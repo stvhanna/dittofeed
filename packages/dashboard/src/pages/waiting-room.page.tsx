@@ -16,12 +16,13 @@ import { PropsWithInitialState } from "../lib/types";
 interface WaitingRoomProps {
   refreshUrl: string;
   emailVerified: boolean;
+  signOutUrl?: string;
 }
 
 export const getServerSideProps: GetServerSideProps<
   PropsWithInitialState<WaitingRoomProps>
 > = async (ctx) => {
-  const rc = await getRequestContext(ctx.req.headers.authorization ?? null);
+  const rc = await getRequestContext(ctx.req.headers);
   if (rc.isOk()) {
     return {
       redirect: {
@@ -32,14 +33,21 @@ export const getServerSideProps: GetServerSideProps<
   }
   logger().info(rc.error, "waiting room onboarding incomplete");
 
-  const { oauthStartUrl } = backendConfig();
+  const { oauthStartUrl, signoutUrl } = backendConfig();
 
   const emailVerified =
     rc.error.type !== RequestContextErrorType.EmailNotVerified;
+
+  const props: WaitingRoomProps = {
+    refreshUrl: oauthStartUrl ?? "/waiting-room",
+    emailVerified,
+  };
+  if (signoutUrl) {
+    props.signOutUrl = signoutUrl;
+  }
   return {
     props: {
-      refreshUrl: oauthStartUrl ?? "/waiting-room",
-      emailVerified,
+      ...props,
       serverInitialState: {},
     },
   };
@@ -48,6 +56,7 @@ export const getServerSideProps: GetServerSideProps<
 const WaitingRoom: NextPage<WaitingRoomProps> = function WaitingRoom({
   refreshUrl,
   emailVerified,
+  signOutUrl,
 }) {
   const theme = useTheme();
   return (
@@ -76,36 +85,38 @@ const WaitingRoom: NextPage<WaitingRoomProps> = function WaitingRoom({
               Thank you for signing up for Dittofeed!
             </Typography>
             {!emailVerified ? (
-              <Typography sx={{ fontSize: "1.5rem" }}>
+              <Typography sx={{ fontSize: "1rem" }}>
                 Please check your email to verify your email address.
               </Typography>
             ) : null}
-            <Typography sx={{ fontSize: "1.5rem" }}>
-              Get in touch and we will finish setting up your workspace.
+            <Typography sx={{ fontSize: "1rem" }}>
+              Get in touch and we will finish setting up your workspace. When we
+              are done click the <b>Refresh</b> button.
             </Typography>
-            <Stack direction="row" spacing={1}>
-              <Typography sx={{ fontSize: "1.5rem" }}>
-                When we are done click the Refresh button.
-              </Typography>
-            </Stack>
             <Box>
-              <Button
-                href={refreshUrl}
-                LinkComponent={Link}
-                sx={{ fontSize: "1.5rem" }}
-                variant="outlined"
-              >
+              <Button href={refreshUrl} LinkComponent={Link} variant="outlined">
                 Refresh
               </Button>
             </Box>
-            <Stack direction="row" spacing={1}>
+            <Stack direction="row" spacing={1} sx={{ fontSize: "1rem" }}>
               <Typography variant="subtitle1">Send us an email:</Typography>
               <SupportEmailLink />
             </Stack>
-            <Stack direction="row" spacing={1}>
+            <Stack direction="row" spacing={1} sx={{ fontSize: "1rem" }}>
               <Typography variant="subtitle1">Reach out on slack:</Typography>
               <SlackLink>Dittofeed Slack community</SlackLink>
             </Stack>
+            {signOutUrl ? (
+              <Box>
+                <Button
+                  LinkComponent={Link}
+                  href={signOutUrl}
+                  variant="outlined"
+                >
+                  Sign Out
+                </Button>
+              </Box>
+            ) : null}
           </Stack>
         </Stack>
       </main>

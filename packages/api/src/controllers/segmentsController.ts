@@ -1,14 +1,12 @@
 import { TypeBoxTypeProvider } from "@fastify/type-provider-typebox";
+import { Type } from "@sinclair/typebox";
 import prisma, { Prisma } from "backend-lib/src/prisma";
-import { upsertSegment } from "backend-lib/src/segments";
-import { submitBroadcast } from "backend-lib/src/userEvents";
+import { buildSegmentsFile, upsertSegment } from "backend-lib/src/segments";
 import { FastifyInstance } from "fastify";
 import {
-  BroadcastResource,
   DeleteSegmentRequest,
   EmptyResponse,
   SegmentResource,
-  UpsertBroadcastResource,
   UpsertSegmentResource,
 } from "isomorphic-lib/src/types";
 
@@ -74,53 +72,29 @@ export default async function segmentsController(fastify: FastifyInstance) {
     }
   );
 
-  fastify.withTypeProvider<TypeBoxTypeProvider>().put(
-    "/broadcasts",
+  fastify.withTypeProvider<TypeBoxTypeProvider>().get(
+    "/download",
     {
       schema: {
-        description: "Submit a broadcast for a segment.",
-        body: UpsertBroadcastResource,
-        response: {
-          200: BroadcastResource,
+        description: "Download a csv containing segment assignments.",
+        querystring: Type.Object({
+          workspaceId: Type.String(),
+        }),
+        200: {
+          type: "string",
+          format: "binary",
         },
       },
     },
+
     async (request, reply) => {
-      const { id, name, workspaceId, segmentId } = request.body;
-
-      await submitBroadcast({
-        workspaceId,
-        segmentId,
-        broadcastId: id,
-        broadcastName: name,
+      const { fileName, fileContent } = await buildSegmentsFile({
+        workspaceId: request.query.workspaceId,
       });
-
-      const broadcast = await prisma().broadcast.upsert({
-        where: {
-          id,
-        },
-        create: {
-          name,
-          segmentId,
-          status: "Successful",
-          workspaceId,
-          id,
-          triggeredAt: new Date(),
-        },
-        update: {},
-      });
-
-      const resource: BroadcastResource = {
-        workspaceId: broadcast.workspaceId,
-        id: broadcast.id,
-        name: broadcast.name,
-        segmentId: broadcast.segmentId,
-        triggeredAt: broadcast.triggeredAt
-          ? broadcast.triggeredAt.getTime()
-          : undefined,
-        createdAt: broadcast.createdAt.getTime(),
-      };
-      return reply.status(200).send(resource);
+      return reply
+        .header("Content-Disposition", `attachment; filename=${fileName}`)
+        .type("text/csv")
+        .send(fileContent);
     }
   );
 }

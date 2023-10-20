@@ -4,13 +4,17 @@ import {
   DEBUG_USER_ID1,
   SUBSCRIPTION_SECRET_NAME,
 } from "isomorphic-lib/src/constants";
+import { v5 as uuidv5 } from "uuid";
 
 import { segmentIdentifyEvent } from "../test/factories/segment";
+import { createWriteKey } from "./auth";
+import { getDefaultMessageTemplates } from "./bootstrap/messageTemplates";
 import { createClickhouseDb } from "./clickhouse";
 import config from "./config";
 import { generateSecureKey } from "./crypto";
 import { kafkaAdmin } from "./kafka";
 import logger from "./logger";
+import { upsertMessageTemplate } from "./messageTemplates";
 import prisma from "./prisma";
 import { prismaMigrate } from "./prisma/migrate";
 import {
@@ -19,34 +23,47 @@ import {
 } from "./segments/computePropertiesWorkflow";
 import { upsertSubscriptionGroup } from "./subscriptionGroups";
 import connectWorkflowClient from "./temporal/connectWorkflowClient";
-import { SubscriptionGroupType, UserPropertyDefinitionType } from "./types";
+import {
+  ChannelType,
+  SubscriptionGroupType,
+  UserPropertyDefinitionType,
+} from "./types";
 import {
   createUserEventsTables,
   insertUserEvents,
 } from "./userEvents/clickhouse";
 
 async function bootstrapPostgres({
-  workspaceId,
   workspaceName,
+  workspaceDomain,
 }: {
-  workspaceId: string;
   workspaceName: string;
-}) {
+  workspaceDomain?: string;
+}): Promise<{ workspaceId: string }> {
   const { defaultUserEventsTableVersion } = config();
 
   await prismaMigrate();
 
-  // TODO allow workspace name to be updated
-  await prisma().workspace.upsert({
-    where: {
-      id: workspaceId,
+  logger().info(
+    {
+      workspaceName,
+      workspaceDomain,
     },
-    update: {},
-    create: {
-      id: workspaceId,
+    "Upserting workspace."
+  );
+  const workspace = await prisma().workspace.upsert({
+    where: {
       name: workspaceName,
     },
+    update: {
+      domain: workspaceDomain,
+    },
+    create: {
+      name: workspaceName,
+      domain: workspaceDomain,
+    },
   });
+  const workspaceId = workspace.id;
 
   await prisma().currentUserEventsTable.upsert({
     where: {
@@ -92,6 +109,14 @@ async function bootstrapPostgres({
         },
       },
       {
+        name: "deviceToken",
+        workspaceId,
+        definition: {
+          type: UserPropertyDefinitionType.Trait,
+          path: "deviceToken",
+        },
+      },
+      {
         name: "firstName",
         workspaceId,
         definition: {
@@ -126,20 +151,6 @@ async function bootstrapPostgres({
     ];
 
   await Promise.all([
-    prisma().channel.upsert({
-      where: {
-        workspaceId_name: {
-          workspaceId,
-          name: "email",
-        },
-      },
-      create: {
-        workspaceId,
-        name: "email",
-        identifier: "email",
-      },
-      update: {},
-    }),
     ...userProperties.map((up) =>
       prisma().userProperty.upsert({
         where: {
@@ -162,17 +173,37 @@ async function bootstrapPostgres({
       create: {
         workspaceId,
         name: SUBSCRIPTION_SECRET_NAME,
-        value: generateSecureKey(),
+        value: generateSecureKey(8),
       },
       update: {},
     }),
+    createWriteKey({
+      workspaceId,
+      writeKeyName: "default-write-key",
+      writeKeyValue: generateSecureKey(8),
+    }),
+    ...getDefaultMessageTemplates({
+      workspaceId,
+    }).map(upsertMessageTemplate),
   ]);
 
-  await upsertSubscriptionGroup({
-    workspaceId,
-    name: `${workspaceName} - Email`,
-    type: SubscriptionGroupType.OptOut,
-  });
+  await Promise.all([
+    upsertSubscriptionGroup({
+      workspaceId,
+      id: uuidv5("email-subscription-group", workspaceId),
+      name: `${workspaceName} - Email`,
+      type: SubscriptionGroupType.OptOut,
+      channel: ChannelType.Email,
+    }),
+    upsertSubscriptionGroup({
+      workspaceId,
+      id: uuidv5("mobile-push-subscription-group", workspaceId),
+      name: `${workspaceName} - Mobile Push`,
+      type: SubscriptionGroupType.OptOut,
+      channel: ChannelType.MobilePush,
+    }),
+  ]);
+  return { workspaceId };
 }
 
 async function bootstrapKafka() {
@@ -208,17 +239,20 @@ async function bootstrapClickhouse() {
   });
 }
 
-async function bootstrapWorker() {
+export async function bootstrapWorker({
+  workspaceId,
+}: {
+  workspaceId: string;
+}) {
   const temporalClient = await connectWorkflowClient();
-
   try {
     await temporalClient.start(computePropertiesWorkflow, {
       taskQueue: "default",
-      workflowId: generateComputePropertiesId(config().defaultWorkspaceId),
+      workflowId: generateComputePropertiesId(workspaceId),
       args: [
         {
           tableVersion: config().defaultUserEventsTableVersion,
-          workspaceId: config().defaultWorkspaceId,
+          workspaceId,
           shouldContinueAsNew: true,
         },
       ],
@@ -274,16 +308,17 @@ async function insertDefaultEvents({ workspaceId }: { workspaceId: string }) {
 }
 
 export default async function bootstrap({
-  workspaceId,
   workspaceName,
+  workspaceDomain,
 }: {
-  workspaceId: string;
   workspaceName: string;
-}) {
+  workspaceDomain?: string;
+}): Promise<{ workspaceId: string }> {
+  const { workspaceId } = await bootstrapPostgres({
+    workspaceName,
+    workspaceDomain,
+  });
   const initialBootstrap = [
-    bootstrapPostgres({ workspaceId, workspaceName }).catch((err) =>
-      logger().error({ err }, "failed to bootstrap postgres")
-    ),
     bootstrapClickhouse().catch((err) =>
       logger().error({ err }, "failed to bootstrap clickhouse")
     ),
@@ -302,6 +337,7 @@ export default async function bootstrap({
   }
 
   if (config().bootstrapWorker) {
-    await bootstrapWorker();
+    await bootstrapWorker({ workspaceId });
   }
+  return { workspaceId };
 }

@@ -1,13 +1,19 @@
 import LoadingButton from "@mui/lab/LoadingButton";
 import {
+  FormControl,
   FormControlLabel,
   FormGroup,
+  InputLabel,
+  MenuItem,
+  Select,
   Stack,
   Switch,
   Typography,
   useTheme,
 } from "@mui/material";
+import { SelectInputProps } from "@mui/material/Select/SelectInput";
 import {
+  ChannelType,
   CompletionStatus,
   SubscriptionGroupResource,
   SubscriptionGroupType,
@@ -16,6 +22,7 @@ import {
 import { GetServerSideProps } from "next";
 import { useRouter } from "next/router";
 import React, { useMemo } from "react";
+import { shallow } from "zustand/shallow";
 
 import { BulletList, BulletListItem } from "../../components/bulletList";
 import EditableName from "../../components/editableName";
@@ -35,25 +42,41 @@ export const getServerSideProps: GetServerSideProps<PropsWithInitialState> =
 export default function SubscriptionGroupConfig() {
   const theme = useTheme();
   const path = useRouter();
-  const subscriptionGroupUpdateRequest = useAppStore(
-    (store) => store.subscriptionGroupUpdateRequest
-  );
-  const updateEditedSubscriptionGroup = useAppStore(
-    (store) => store.updateEditedSubscriptionGroup
-  );
-  const editedSubscriptionGroup = useAppStore(
-    (store) => store.editedSubscriptionGroup
-  );
-  const setSubscriptionGroupUpdateRequest = useAppStore(
-    (store) => store.setSubscriptionGroupUpdateRequest
-  );
-  const apiBase = useAppStore((store) => store.apiBase);
-  const upsertSubscriptionGroup = useAppStore(
-    (store) => store.upsertSubscriptionGroup
+  const {
+    subscriptionGroupUpdateRequest,
+    updateEditedSubscriptionGroup,
+    editedSubscriptionGroup,
+    setSubscriptionGroupUpdateRequest,
+    apiBase,
+    upsertSubscriptionGroup,
+    enableMobilePush,
+  } = useAppStore(
+    (store) => ({
+      enableMobilePush: store.enableMobilePush,
+      upsertSubscriptionGroup: store.upsertSubscriptionGroup,
+      apiBase: store.apiBase,
+      subscriptionGroupUpdateRequest: store.subscriptionGroupUpdateRequest,
+      updateEditedSubscriptionGroup: store.updateEditedSubscriptionGroup,
+      editedSubscriptionGroup: store.editedSubscriptionGroup,
+      setSubscriptionGroupUpdateRequest:
+        store.setSubscriptionGroupUpdateRequest,
+    }),
+    shallow
   );
   const id = typeof path.query.id === "string" ? path.query.id : undefined;
 
   const workspace = useAppStore((store) => store.workspace);
+
+  const onChannelChangeHandler: SelectInputProps<ChannelType>["onChange"] = (
+    e
+  ) => {
+    if (editedSubscriptionGroup) {
+      updateEditedSubscriptionGroup({
+        id: editedSubscriptionGroup.id,
+        channel: e.target.value as ChannelType,
+      });
+    }
+  };
 
   const handleSubmit = useMemo(() => {
     if (
@@ -70,6 +93,7 @@ export default function SubscriptionGroupConfig() {
       name,
       id,
       type: editedSubscriptionGroup.type,
+      channel: editedSubscriptionGroup.channel,
     };
 
     return apiRequestHandlerFactory({
@@ -115,6 +139,7 @@ export default function SubscriptionGroupConfig() {
   }
 
   const optIn = editedSubscriptionGroup.type === SubscriptionGroupType.OptIn;
+  const hasBeenCreated = editedSubscriptionGroup.createdAt !== undefined;
   return (
     <SubscriptionGroupLayout tab={SubscriptionGroupTabLabel.Configure} id={id}>
       <Stack
@@ -136,16 +161,6 @@ export default function SubscriptionGroupConfig() {
               updateEditedSubscriptionGroup({ name: e.target.value })
             }
           />
-          <LoadingButton
-            onClick={handleSubmit}
-            loading={
-              subscriptionGroupUpdateRequest.type ===
-              CompletionStatus.InProgress
-            }
-            variant="contained"
-          >
-            Save
-          </LoadingButton>
         </Stack>
 
         <FormGroup>
@@ -175,6 +190,36 @@ export default function SubscriptionGroupConfig() {
             }
           />
         </FormGroup>
+        <InfoTooltip
+          title={`The messaging channel which users can subscribe and unsubscribe to.${
+            hasBeenCreated
+              ? " Cannot modify the channel of an existing subscription group."
+              : ""
+          }`}
+        >
+          <FormControl
+            sx={{ width: theme.spacing(16) }}
+            disabled={hasBeenCreated}
+          >
+            <InputLabel id="message-channel-select-label">
+              Message Channel
+            </InputLabel>
+            <Select
+              labelId="message-channel-select-label"
+              label="Message Channel"
+              onChange={onChannelChangeHandler}
+              value={editedSubscriptionGroup.channel}
+            >
+              <MenuItem value={ChannelType.Email}>Email</MenuItem>
+              <MenuItem
+                disabled={!enableMobilePush}
+                value={ChannelType.MobilePush}
+              >
+                Mobile Push
+              </MenuItem>
+            </Select>
+          </FormControl>
+        </InfoTooltip>
         <InfoBox>
           Subscription groups define a group of users who are eligible to
           receive a set of messages. They are useful for:
@@ -188,6 +233,15 @@ export default function SubscriptionGroupConfig() {
             </BulletListItem>
           </BulletList>
         </InfoBox>
+        <LoadingButton
+          onClick={handleSubmit}
+          loading={
+            subscriptionGroupUpdateRequest.type === CompletionStatus.InProgress
+          }
+          variant="contained"
+        >
+          Save
+        </LoadingButton>
       </Stack>
     </SubscriptionGroupLayout>
   );

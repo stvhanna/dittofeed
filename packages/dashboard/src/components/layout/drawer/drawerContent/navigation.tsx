@@ -1,33 +1,65 @@
 // material-ui
-import { Box, Typography } from "@mui/material";
+import { ArrowBackIos } from "@mui/icons-material";
+import { Box, IconButton, Stack, Typography } from "@mui/material";
+import Link from "next/link";
 import { useContext } from "react";
 
 import { LayoutContext } from "../../context";
+import MinimalNavGroup from "./navigation/minimalNavGroup";
 // project import
 import NavGroup from "./navigation/navGroup";
 
 // ==============================|| DRAWER CONTENT - NAVIGATION ||============================== //
 
 function Navigation() {
-  const items = useContext(LayoutContext)?.items;
-  if (!items) {
-    return null;
-  }
+  const layout = useContext(LayoutContext);
+  const items = layout?.items;
+  const title = layout?.pageTitle;
+  const backLink = layout?.backLink;
+  const navigationRenderer = layout?.navigationRenderer;
+  const isMinimal = navigationRenderer === "minimal";
 
-  const navGroups = items.map((item) => {
-    switch (item.type) {
-      case "group":
-        return <NavGroup key={item.id} item={item} />;
-      default:
-        return (
-          <Typography key={item.id} variant="h6" color="error" align="center">
-            Fix - Navigation Group
+  const navGroups = items
+    ? items.map((item) => {
+        switch (item.type) {
+          case "group":
+            return isMinimal ? (
+              <MinimalNavGroup key={item.id} item={item} />
+            ) : (
+              <NavGroup key={item.id} item={item} />
+            );
+          default:
+            return (
+              <Typography
+                key={item.id}
+                variant="h6"
+                color="error"
+                align="center"
+              >
+                Fix - Navigation Group
+              </Typography>
+            );
+        }
+      })
+    : null;
+
+  return (
+    <Box sx={{ pt: 2, px: isMinimal ? 3 : undefined }}>
+      {title ? (
+        <Stack direction="row" sx={{ ml: -1, alignItems: "center" }}>
+          {backLink ? (
+            <IconButton component={Link} href={backLink}>
+              <ArrowBackIos fontSize="inherit" />
+            </IconButton>
+          ) : null}
+          <Typography variant="h1" fontSize={21}>
+            {title}
           </Typography>
-        );
-    }
-  });
-
-  return <Box sx={{ pt: 2 }}>{navGroups}</Box>;
+        </Stack>
+      ) : null}
+      {navGroups}
+    </Box>
+  );
 }
 
 export default Navigation;

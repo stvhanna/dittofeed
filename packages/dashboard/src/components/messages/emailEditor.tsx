@@ -4,6 +4,7 @@ import { linter, lintGutter } from "@codemirror/lint";
 import { EditorView } from "@codemirror/view";
 import { Fullscreen, FullscreenExit } from "@mui/icons-material";
 import {
+  Alert,
   Box,
   Button,
   Dialog,
@@ -26,18 +27,25 @@ import escapeHtml from "escape-html";
 import hash from "fnv1a";
 import { produce } from "immer";
 import {
+  ChannelType,
   CompletionStatus,
+  EmailTemplateResource,
+  EphemeralRequestStatus,
   JsonResultType,
   MessageTemplateResource,
+  MessageTemplateTestRequest,
+  MessageTemplateTestResponse,
   RenderMessageTemplateRequest,
   RenderMessageTemplateResponse,
-  TemplateResourceType,
   UpsertMessageTemplateResource,
 } from "isomorphic-lib/src/types";
 import { useRouter } from "next/router";
 import { closeSnackbar, enqueueSnackbar } from "notistack";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useDebounce } from "use-debounce";
+import { create } from "zustand";
+import { immer } from "zustand/middleware/immer";
+import { shallow } from "zustand/shallow";
 
 import apiRequestHandlerFactory from "../../lib/apiRequestHandlerFactory";
 import { useAppStore } from "../../lib/appStore";
@@ -45,9 +53,11 @@ import {
   noticeAnchorOrigin as anchorOrigin,
   noticeAnchorOrigin,
 } from "../../lib/notices";
-import { EmailMessageEditorState } from "../../lib/types";
+import { AppContents, EmailMessageEditorState } from "../../lib/types";
+import { useUpdateEffect } from "../../lib/useUpdateEffect";
 import EditableName from "../editableName";
 import InfoTooltip from "../infoTooltip";
+import LoadingModal from "../loadingModal";
 import defaultEmailBody from "./defaultEmailBody";
 
 function TransitionInner(
@@ -73,18 +83,23 @@ export const defaultInitialUserProperties = {
   anonymousId: "0b0d3a71-0a86-4e60-892a-d27f0b290c81",
 };
 
-export const defaultEmailMessageState: Omit<
+export function defaultEmailMessageState(
+  id: string
+): Omit<
   EmailMessageEditorState,
   "emailMessageUserPropertiesJSON" | "emailMessageUserProperties"
-> = {
-  emailMessageBody: defaultEmailBody,
-  emailMessageTitle: "New Email Message",
-  emailMessageSubject: 'Hi {{ user.firstName | default: "there"}}!',
-  emailMessageFrom: '{{ user.accountManager | default: "hello@company.com"}}',
-  emailMessageUpdateRequest: {
-    type: CompletionStatus.NotStarted,
-  },
-};
+> {
+  return {
+    emailMessageBody: defaultEmailBody,
+    emailMessageTitle: `New Email Message - ${id}`,
+    emailMessageSubject: 'Hi {{ user.firstName | default: "there"}}!',
+    emailMessageFrom: '{{ user.accountManager | default: "hello@company.com"}}',
+    emailMessageReplyTo: "",
+    emailMessageUpdateRequest: {
+      type: CompletionStatus.NotStarted,
+    },
+  };
+}
 
 const BodyBox = styled(Box, {
   shouldForwardProp: (prop) => prop !== "direction",
@@ -106,12 +121,115 @@ const BodyBox = styled(Box, {
   })
 );
 
+interface EmailEditorStore {
+  messageTestRequest: EphemeralRequestStatus<Error>;
+  setMessageTestRequest: (request: EphemeralRequestStatus<Error>) => void;
+  testResponse: MessageTemplateTestResponse | null;
+  setTestResponse: (response: MessageTemplateTestResponse | null) => void;
+}
+
+export const useEmailEditorStore = create(
+  immer<EmailEditorStore>((set) => ({
+    messageTestRequest: {
+      type: CompletionStatus.NotStarted,
+    },
+    setMessageTestRequest: (request) => {
+      set((state) => {
+        state.messageTestRequest = request;
+      });
+    },
+    testResponse: null,
+    setTestResponse: (response) => {
+      set((state) => {
+        state.testResponse = response;
+      });
+    },
+  }))
+);
+
+function upsert({
+  workspaceId,
+  messageId,
+  emailFrom,
+  emailBody,
+  emailSubject,
+  emailMessageReplyTo,
+  apiBase,
+  emailMessageUpdateRequest,
+  setEmailMessageUpdateRequest,
+  emailMessageTitle,
+  upsertMessage,
+  saveAsDraft = false,
+}: {
+  workspaceId?: string;
+  saveAsDraft?: boolean;
+  messageId: string | null;
+  emailMessageTitle: string;
+  emailFrom: string;
+  emailBody: string;
+  emailSubject: string;
+  emailMessageReplyTo: string;
+  apiBase: string;
+  upsertMessage: AppContents["upsertMessage"];
+  emailMessageUpdateRequest: AppContents["emailMessageUpdateRequest"];
+  setEmailMessageUpdateRequest: AppContents["setEmailMessageUpdateRequest"];
+}) {
+  if (
+    !workspaceId ||
+    !messageId ||
+    emailMessageTitle.length === 0 ||
+    emailBody.length === 0 ||
+    emailSubject.length === 0
+  ) {
+    return;
+  }
+  const upsertEmailDefinition: EmailTemplateResource = {
+    type: ChannelType.Email,
+    from: emailFrom,
+    body: emailBody,
+    subject: emailSubject,
+  };
+
+  if (emailMessageReplyTo.length) {
+    upsertEmailDefinition.replyTo = emailMessageReplyTo;
+  }
+
+  const updateData: UpsertMessageTemplateResource = {
+    id: messageId,
+    workspaceId,
+    name: emailMessageTitle,
+    draft: upsertEmailDefinition,
+  };
+
+  if (!saveAsDraft) {
+    updateData.definition = upsertEmailDefinition;
+  }
+
+  apiRequestHandlerFactory({
+    request: emailMessageUpdateRequest,
+    setRequest: setEmailMessageUpdateRequest,
+    responseSchema: MessageTemplateResource,
+    setResponse: upsertMessage,
+    onSuccessNotice: `Saved template.`,
+    onFailureNoticeHandler: () => `API Error: Failed to save template.`,
+    requestConfig: {
+      method: "PUT",
+      url: `${apiBase}/api/content/templates`,
+      data: updateData,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    },
+  })();
+}
+
 type Fullscreen = "editor" | "preview" | null;
 
 enum NotifyKey {
   RenderBodyError = "RenderBodyError",
   RenderFromError = "RenderFromError",
   RenderSubjectError = "RenderSubjectError",
+  RenderReplyToError = "RenderReplyToError",
   UserPropertyWarning = "UserPropertyWarning",
 }
 
@@ -121,16 +239,82 @@ function errorHash(key: NotifyKey, message: string) {
 
 const errorBodyHtml = '<div style="color:red;">Render Error</div>';
 
-export default function EmailEditor() {
+export default function EmailEditor({
+  hideSaveButton,
+  hideTitle,
+  templateId: messageId,
+  saveOnUpdate,
+  disabled,
+}: {
+  templateId: string;
+  hideSaveButton?: boolean;
+  hideTitle?: boolean;
+  saveOnUpdate?: boolean;
+  disabled?: boolean;
+}) {
   const theme = useTheme();
   const router = useRouter();
   const [errors, setErrors] = useState<Map<NotifyKey, string>>(new Map());
   const [previewBodyHtml, setRenderedBody] = useState<string>("");
   const [previewSubject, setRenderedSubject] = useState<string>("");
   const [previewEmailFrom, setRenderedFrom] = useState<string>("");
-
+  const [previewEmailReplyTo, setRenderedReplyTo] = useState<string>("");
+  const messageTestRequest = useEmailEditorStore(
+    (store) => store.messageTestRequest
+  );
+  const setMessageTestRequest = useEmailEditorStore(
+    (store) => store.setMessageTestRequest
+  );
+  const testResponse = useEmailEditorStore((store) => store.testResponse);
+  const setTestResponse = useEmailEditorStore((store) => store.setTestResponse);
   const [fullscreen, setFullscreen] = useState<Fullscreen>(null);
-  const userProperties = useAppStore((state) => state.userProperties);
+  const {
+    apiBase,
+    emailMessageBody: emailBody,
+    emailMessageFrom: emailFrom,
+    emailMessageSubject: emailSubject,
+    emailMessageTitle,
+    emailMessageUpdateRequest,
+    emailMessageUserProperties: mockUserProperties,
+    emailMessageUserPropertiesJSON: userPropertiesJSON,
+    emailMessageReplyTo,
+    replaceEmailMessageProps: replaceUserProperties,
+    setEmailMessageBody: setEmailBody,
+    setEmailMessageFrom: setEmailFrom,
+    setEmailMessageTitle,
+    setEmailMessagePropsJSON: setUserPropertiesJSON,
+    setEmailMessageSubject: setSubject,
+    setEmailMessageUpdateRequest,
+    upsertMessage,
+    userProperties,
+    setEmailMessageReplyTo,
+    workspace: workspaceRequest,
+  } = useAppStore(
+    (state) => ({
+      apiBase: state.apiBase,
+      emailMessageBody: state.emailMessageBody,
+      emailMessageFrom: state.emailMessageFrom,
+      emailMessageSubject: state.emailMessageSubject,
+      emailMessageTitle: state.emailMessageTitle,
+      emailMessageUpdateRequest: state.emailMessageUpdateRequest,
+      emailMessageUserProperties: state.emailMessageUserProperties,
+      emailMessageUserPropertiesJSON: state.emailMessageUserPropertiesJSON,
+      emailMessageReplyTo: state.emailMessageReplyTo,
+      replaceEmailMessageProps: state.replaceEmailMessageProps,
+      setEmailMessageBody: state.setEmailMessageBody,
+      setEmailMessageFrom: state.setEmailMessageFrom,
+      setEmailMessageTitle: state.setEmailMessageTitle,
+      setEmailMessageReplyTo: state.setEmailMessageReplyTo,
+      setEmailMessagePropsJSON: state.setEmailMessagePropsJSON,
+      setEmailMessageSubject: state.setEmailMessageSubject,
+      setEmailMessageUpdateRequest: state.setEmailMessageUpdateRequest,
+      upsertMessage: state.upsertMessage,
+      userProperties: state.userProperties,
+      workspace: state.workspace,
+    }),
+    shallow
+  );
+
   const userPropertySet: Set<string> = useMemo(
     () =>
       new Set(
@@ -140,38 +324,7 @@ export default function EmailEditor() {
       ),
     [userProperties]
   );
-  const title = useAppStore((state) => state.emailMessageTitle);
-  const setTitle = useAppStore((state) => state.setEmailMessageProps);
-  const emailSubject = useAppStore((state) => state.emailMessageSubject);
-  const workspaceRequest = useAppStore((store) => store.workspace);
-  const mockUserProperties = useAppStore(
-    (state) => state.emailMessageUserProperties
-  );
-  const setSubject = useAppStore((state) => state.setEmailMessageSubject);
-  const setEmailBody = useAppStore((state) => state.setEmailMessageBody);
-  const setEmailFrom = useAppStore((state) => state.setEmailMessageFrom);
-  const setEmailMessageUpdateRequest = useAppStore(
-    (state) => state.setEmailMessageUpdateRequest
-  );
-  const upsertMessage = useAppStore((state) => state.upsertMessage);
-  const emailMessageUpdateRequest = useAppStore(
-    (state) => state.emailMessageUpdateRequest
-  );
-  const emailFrom = useAppStore((state) => state.emailMessageFrom);
-  const emailBody = useAppStore((state) => state.emailMessageBody);
-  const apiBase = useAppStore((state) => state.apiBase);
-  const userPropertiesJSON = useAppStore(
-    (state) => state.emailMessageUserPropertiesJSON
-  );
-  const setUserPropertiesJSON = useAppStore(
-    (state) => state.setEmailMessagePropsJSON
-  );
-  const replaceUserProperties = useAppStore(
-    (state) => state.replaceEmailMessageProps
-  );
 
-  const messageId =
-    typeof router.query.id === "string" ? router.query.id : null;
   const workspace =
     workspaceRequest.type === CompletionStatus.Successful
       ? workspaceRequest.value
@@ -203,6 +356,7 @@ export default function EmailEditor() {
   const [debouncedEmailSubject] = useDebounce(emailSubject, 300);
   const [debouncedUserProperties] = useDebounce(mockUserProperties, 300);
   const [debouncedEmailFrom] = useDebounce(emailFrom, 300);
+  const [debouncedReplyTo] = useDebounce(emailMessageReplyTo, 300);
 
   useEffect(() => {
     const exitingFunction = () => {
@@ -229,14 +383,26 @@ export default function EmailEditor() {
 
       const data: RenderMessageTemplateRequest = {
         workspaceId: workspace.id,
-        channel: "email",
+        channel: ChannelType.Email,
         userProperties: debouncedUserProperties,
         contents: {
-          from: debouncedEmailFrom,
-          subject: debouncedEmailSubject,
-          body: debouncedEmailBody,
+          from: {
+            value: debouncedEmailFrom,
+          },
+          subject: {
+            value: debouncedEmailSubject,
+          },
+          body: {
+            mjml: true,
+            value: debouncedEmailBody,
+          },
         },
       };
+      if (debouncedReplyTo.length) {
+        data.contents.replyTo = {
+          value: debouncedReplyTo,
+        };
+      }
 
       try {
         const response = await axios({
@@ -267,6 +433,10 @@ export default function EmailEditor() {
               setter = (c: string) => setRenderedFrom(escapeHtml(c));
               errorKey = NotifyKey.RenderFromError;
               break;
+            case "replyTo":
+              setter = (c: string) => setRenderedReplyTo(escapeHtml(c));
+              errorKey = NotifyKey.RenderReplyToError;
+              break;
           }
 
           if (errorKey && setter) {
@@ -295,6 +465,9 @@ export default function EmailEditor() {
                   break;
                 case NotifyKey.RenderFromError:
                   message = `From Error: ${content.err}`;
+                  break;
+                case NotifyKey.RenderReplyToError:
+                  message = `Reply-To Error: ${content.err}`;
                   break;
               }
 
@@ -331,6 +504,7 @@ export default function EmailEditor() {
     apiBase,
     debouncedEmailBody,
     debouncedEmailFrom,
+    debouncedReplyTo,
     debouncedEmailSubject,
     debouncedUserProperties,
     errors,
@@ -378,37 +552,52 @@ export default function EmailEditor() {
     setRenderedBody(errorBodyHtml);
   }, [errors, mockUserProperties, userPropertySet]);
 
+  const handleSave = useCallback(
+    ({ saveAsDraft = false }: { saveAsDraft?: boolean }) => {
+      if (disabled) {
+        return;
+      }
+      upsert({
+        workspaceId: workspace?.id,
+        messageId,
+        emailBody: debouncedEmailBody,
+        emailFrom: debouncedEmailFrom,
+        emailSubject: debouncedEmailSubject,
+        emailMessageReplyTo: debouncedReplyTo,
+        emailMessageUpdateRequest,
+        saveAsDraft,
+        setEmailMessageUpdateRequest,
+        upsertMessage,
+        apiBase,
+        emailMessageTitle,
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      // README don't update on emailMessageUpdateRequest change
+      apiBase,
+      disabled,
+      debouncedEmailBody,
+      debouncedEmailFrom,
+      debouncedEmailSubject,
+      debouncedReplyTo,
+      emailMessageTitle,
+      messageId,
+      setEmailMessageUpdateRequest,
+      upsertMessage,
+      workspace?.id,
+    ]
+  );
+
+  useUpdateEffect(() => {
+    handleSave({
+      saveAsDraft: !saveOnUpdate,
+    });
+  }, [handleSave, saveOnUpdate]);
+
   if (!workspace || !messageId) {
     return null;
   }
-
-  const updateData: UpsertMessageTemplateResource = {
-    id: messageId,
-    type: TemplateResourceType.Email,
-    workspaceId: workspace.id,
-    name: title,
-    from: emailFrom,
-    body: emailBody,
-    subject: emailSubject,
-  };
-
-  const handleSave = apiRequestHandlerFactory({
-    request: emailMessageUpdateRequest,
-    setRequest: setEmailMessageUpdateRequest,
-    responseSchema: MessageTemplateResource,
-    setResponse: upsertMessage,
-    onSuccessNotice: `Saved template ${title}.`,
-    onFailureNoticeHandler: () =>
-      `API Error: Failed to save template ${title}.`,
-    requestConfig: {
-      method: "PUT",
-      url: `${apiBase}/api/content/templates`,
-      data: updateData,
-      headers: {
-        "Content-Type": "application/json",
-      },
-    },
-  });
 
   const htmlCodeMirrorHandleChange = (val: string) => {
     setEmailBody(val);
@@ -455,11 +644,13 @@ export default function EmailEditor() {
           sx={disabledStyles}
           InputProps={{
             sx: {
+              fontSize: ".75rem",
               borderTopRightRadius: 0,
             },
           }}
         />
         <TextField
+          disabled={disabled}
           label="From"
           variant="filled"
           onChange={(e) => {
@@ -468,6 +659,7 @@ export default function EmailEditor() {
           required
           InputProps={{
             sx: {
+              fontSize: ".75rem",
               borderTopRightRadius: 0,
             },
           }}
@@ -476,16 +668,33 @@ export default function EmailEditor() {
         <TextField
           label="Subject"
           required
+          disabled={disabled}
           variant="filled"
           onChange={(e) => {
             setSubject(e.target.value);
           }}
           InputProps={{
             sx: {
+              fontSize: ".75rem",
               borderTopRightRadius: 0,
             },
           }}
           value={emailSubject}
+        />
+        <TextField
+          label="Reply-To"
+          variant="filled"
+          disabled={disabled}
+          onChange={(e) => {
+            setEmailMessageReplyTo(e.target.value);
+          }}
+          InputProps={{
+            sx: {
+              fontSize: ".75rem",
+              borderTopRightRadius: 0,
+            },
+          }}
+          value={emailMessageReplyTo}
         />
       </Stack>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
@@ -505,6 +714,7 @@ export default function EmailEditor() {
         <ReactCodeMirror
           value={emailBody}
           onChange={htmlCodeMirrorHandleChange}
+          readOnly={disabled}
           extensions={[
             html(),
             EditorView.theme({
@@ -536,6 +746,7 @@ export default function EmailEditor() {
           disabled
           InputProps={{
             sx: {
+              fontSize: ".75rem",
               borderTopLeftRadius: 0,
             },
           }}
@@ -549,6 +760,7 @@ export default function EmailEditor() {
           disabled
           InputProps={{
             sx: {
+              fontSize: ".75rem",
               borderTopLeftRadius: 0,
             },
           }}
@@ -562,11 +774,25 @@ export default function EmailEditor() {
           disabled
           InputProps={{
             sx: {
+              fontSize: ".75rem",
               borderTopLeftRadius: 0,
             },
           }}
           sx={disabledStyles}
           value={previewSubject}
+        />
+        <TextField
+          label="Reply-To"
+          variant="filled"
+          disabled
+          InputProps={{
+            sx: {
+              fontSize: ".75rem",
+              borderTopLeftRadius: 0,
+            },
+          }}
+          sx={disabledStyles}
+          value={previewEmailReplyTo}
         />
       </Stack>
 
@@ -598,11 +824,72 @@ export default function EmailEditor() {
     </Stack>
   );
 
+  const submitTestData: MessageTemplateTestRequest = {
+    channel: ChannelType.Email,
+    workspaceId: workspace.id,
+    templateId: messageId,
+    userProperties: mockUserProperties,
+  };
+
+  const submitTest = apiRequestHandlerFactory({
+    request: messageTestRequest,
+    setRequest: setMessageTestRequest,
+    responseSchema: MessageTemplateTestResponse,
+    setResponse: setTestResponse,
+    onSuccessNotice: `Attempted test message.`,
+    onFailureNoticeHandler: () => `API Error: Failed to attempt test message.`,
+    requestConfig: {
+      method: "POST",
+      url: `${apiBase}/api/content/templates/test`,
+      data: submitTestData,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    },
+  });
+
+  let testResponseEl: React.ReactNode = null;
+  if (testResponse) {
+    if (
+      testResponse.type === JsonResultType.Ok &&
+      testResponse.value.type === ChannelType.Email
+    ) {
+      testResponseEl = (
+        <Alert severity="success">
+          Message was sent successfully to {testResponse.value.to}
+        </Alert>
+      );
+    } else if (testResponse.type === JsonResultType.Err) {
+      testResponseEl = (
+        <Stack spacing={1}>
+          <Alert severity="error">
+            Failed to send test message. Suggestions:
+          </Alert>
+          {testResponse.err.suggestions.map((suggestion, i) => (
+            // eslint-disable-next-line react/no-array-index-key
+            <Alert key={i} severity="warning">
+              {suggestion}
+            </Alert>
+          ))}
+          <Typography
+            sx={{
+              fontFamily: "monospace",
+              backgroundColor: theme.palette.grey[100],
+            }}
+          >
+            <code>{testResponse.err.responseData}</code>
+          </Typography>
+        </Stack>
+      );
+    }
+  }
+
   return (
     <>
       <Stack
         direction="row"
         sx={{
+          height: "100%",
           width: "100%",
           paddingRight: 2,
           paddingTop: 2,
@@ -620,13 +907,15 @@ export default function EmailEditor() {
             boxShadow: theme.shadows[2],
           }}
         >
-          <EditableName
-            name={title}
-            variant="h4"
-            onChange={(e) => {
-              setTitle(e.target.value);
-            }}
-          />
+          {!hideTitle && (
+            <EditableName
+              name={emailMessageTitle}
+              variant="h4"
+              onChange={(e) => {
+                setEmailMessageTitle(e.target.value);
+              }}
+            />
+          )}
           <InfoTooltip title={USER_PROPERTIES_TOOLTIP}>
             <Typography variant="h5">User Properties</Typography>
           </InfoTooltip>
@@ -645,13 +934,22 @@ export default function EmailEditor() {
               lintGutter(),
             ]}
           />
-          <Button
-            variant="contained"
-            onClick={handleSave}
-            disabled={errors.size > 0}
+          {!hideSaveButton && (
+            <Button
+              variant="contained"
+              onClick={() => handleSave({})}
+              disabled={errors.size > 0}
+            >
+              Publish Changes
+            </Button>
+          )}
+          <LoadingModal
+            openTitle="Send Test Message"
+            onSubmit={submitTest}
+            onClose={() => setTestResponse(null)}
           >
-            Save
-          </Button>
+            {testResponseEl}
+          </LoadingModal>
         </Stack>
         <Stack direction="row" sx={{ flex: 1 }}>
           <Box

@@ -1,18 +1,7 @@
-/**
- * This example shows how you can use custom nodes and edges to dynamically add elements to your react flow graph.
- * A global layouting function calculates the new positions for the nodes every time the graph changes and animates existing nodes to their new position.
- *
- * There are three ways of adding nodes to the graph:
- *  1. Click an existing node: Create a new child node of the clicked node
- *  2. Click on the plus icon of an existing edge: Create a node in between the connected nodes of the edge
- *  3. Click a placeholder node: Turn the placeholder into a "real" node to prevent jumping of the layout
- *
- * The graph elements are added via hook calls in the custom nodes and edges. The layout is calculated every time the graph changes (see hooks/useLayout.ts).
- * */
 import "reactflow/dist/style.css";
 
 import { Box } from "@mui/material";
-import { JourneyNodeType } from "isomorphic-lib/src/types";
+import { CompletionStatus, JourneyNodeType } from "isomorphic-lib/src/types";
 import React, { DragEvent, DragEventHandler } from "react";
 import ReactFlow, {
   Background,
@@ -30,13 +19,25 @@ import ReactFlow, {
 } from "reactflow";
 import { v4 as uuid } from "uuid";
 
-import { useAppStore } from "../../lib/appStore";
-import { EdgeData, JourneyNodeProps, NodeData } from "../../lib/types";
+import { useAppStorePick } from "../../lib/appStore";
+import {
+  AppState,
+  EdgeData,
+  JourneyNodeProps,
+  NodeData,
+} from "../../lib/types";
+import { useJourneyStats } from "../../lib/useJourneyStats";
 import edgeTypes from "./edgeTypes";
 import NodeEditor from "./nodeEditor";
 import nodeTypes from "./nodeTypes";
 import defaultNodeTypeProps from "./nodeTypes/defaultNodeTypeProps";
 import Sidebar from "./sidebar";
+import {
+  dualNodeNonJourneyNodes,
+  edgesForJourneyNode,
+  WAIT_FOR_SATISFY_LABEL,
+  waitForTimeoutLabel,
+} from "./store";
 
 const proOptions: ProOptions = { account: "paid-pro", hideAttribution: true };
 
@@ -44,143 +45,158 @@ const handleDragOver: DragEventHandler<HTMLDivElement> = (e) => {
   e.preventDefault();
 };
 
-function JourneysBuilderInner() {
-  const setNodes = useAppStore((store) => store.setNodes);
-  const addNodes = useAppStore((store) => store.addNodes);
-  const setEdges = useAppStore((store) => store.setEdges);
-  const nodes = useAppStore((store) => store.journeyNodes);
-  const edges = useAppStore((store) => store.journeyEdges);
-  const draggedComponentType = useAppStore(
-    (store) => store.journeyDraggedComponentType
-  );
+// this function adds a new node and connects it to the source node
+function createConnections({
+  nodes,
+  nodeType,
+  source,
+  target,
+  addNodes,
+}: {
+  nodeType: JourneyNodeType;
+  nodes: AppState["journeyNodes"];
+  addNodes: AppState["addNodes"];
+  source: string;
+  target: string;
+}) {
+  // TODO create an incremental ID based on the number of elements already in the graph
+  const newTargetId = uuid();
 
-  // this function adds a new node and connects it to the source node
-  const createConnections = ({
-    nodeType,
-    source,
-    target,
-  }: {
-    nodeType: JourneyNodeType;
-    source: string;
-    target: string;
-  }) => {
-    // create an incremental ID based on the number of elements already in the graph
-    const newTargetId = uuid();
+  const newJourneyNode: Node<JourneyNodeProps> = {
+    id: newTargetId,
+    data: {
+      type: "JourneyNode",
+      nodeTypeProps: defaultNodeTypeProps(nodeType, nodes),
+    },
+    position: { x: 0, y: 0 }, // no need to pass a position as it is computed by the layout hook
+    type: "journey",
+  };
+  let newNodes: Node<NodeData>[] = [newJourneyNode];
+  let newEdges: Edge<EdgeData>[];
 
-    const newJourneyNode: Node<JourneyNodeProps> = {
-      id: newTargetId,
-      data: {
-        type: "JourneyNode",
-        nodeTypeProps: defaultNodeTypeProps(nodeType, nodes),
-      },
-      position: { x: 0, y: 0 }, // no need to pass a position as it is computed by the layout hook
-      type: "journey",
-    };
-    let newNodes: Node<NodeData>[] = [newJourneyNode];
-
-    let newEdges: Edge<EdgeData>[] = [];
-
-    if (
-      newJourneyNode.data.nodeTypeProps.type ===
-      JourneyNodeType.SegmentSplitNode
-    ) {
-      const trueId = newJourneyNode.data.nodeTypeProps.trueLabelNodeId;
-      const falseId = newJourneyNode.data.nodeTypeProps.falseLabelNodeId;
+  const { nodeTypeProps } = newJourneyNode.data;
+  switch (nodeTypeProps.type) {
+    case JourneyNodeType.SegmentSplitNode: {
+      const trueId = nodeTypeProps.trueLabelNodeId;
+      const falseId = nodeTypeProps.falseLabelNodeId;
       const emptyId = uuid();
 
-      newNodes = newNodes.concat([
-        {
-          id: trueId,
-          data: {
-            type: "LabelNode",
-            title: "true",
-          },
-          position: { x: 0, y: 0 },
-          type: "label",
-        },
-        {
-          id: falseId,
-          data: {
-            type: "LabelNode",
-            title: "false",
-          },
-          position: { x: 0, y: 0 },
-          type: "label",
-        },
-        {
-          id: emptyId,
-          data: {
-            type: "EmptyNode",
-          },
-          position: { x: 0, y: 0 },
-          type: "empty",
-        },
-      ]);
+      newNodes = newNodes.concat(
+        dualNodeNonJourneyNodes({
+          emptyId,
+          leftId: trueId,
+          rightId: falseId,
+          leftLabel: "true",
+          rightLabel: "false",
+        })
+      );
 
-      newEdges = [
-        {
-          id: `${source}->${newJourneyNode.id}`,
-          source,
-          target: newJourneyNode.id,
-          type: "workflow",
-        },
-        {
-          id: `${newJourneyNode.id}->${trueId}`,
-          source: newJourneyNode.id,
-          target: trueId,
-          type: "placeholder",
-        },
-        {
-          id: `${newJourneyNode.id}->${falseId}`,
-          source: newJourneyNode.id,
-          target: falseId,
-          type: "placeholder",
-        },
-        {
-          id: `${trueId}->${emptyId}`,
-          source: trueId,
-          target: emptyId,
-          data: {
-            type: "WorkflowEdge",
-            disableMarker: true,
-          },
-          type: "workflow",
-        },
-        {
-          id: `${falseId}->${emptyId}`,
-          source: falseId,
-          target: emptyId,
-          data: {
-            type: "WorkflowEdge",
-            disableMarker: true,
-          },
-          type: "workflow",
-        },
-        {
-          id: `${emptyId}->${target}`,
-          source: emptyId,
-          target,
-          type: "workflow",
-        },
-      ];
-    } else {
-      newEdges = [
-        {
-          id: `${newJourneyNode.id}->${target}`,
-          source: newJourneyNode.id,
-          target,
-          type: "workflow",
-        },
-        {
-          id: `${source}->${newJourneyNode.id}`,
-          source,
-          target: newJourneyNode.id,
-          type: "workflow",
-        },
-      ];
+      newEdges = edgesForJourneyNode({
+        type: nodeTypeProps.type,
+        nodeId: newTargetId,
+        emptyId,
+        leftId: trueId,
+        rightId: falseId,
+        source,
+        target,
+      });
+      break;
     }
-    addNodes({ nodes: newNodes, edges: newEdges, source, target });
-  };
+    case JourneyNodeType.WaitForNode: {
+      const segmentChild = nodeTypeProps.segmentChildren[0];
+      if (!segmentChild) {
+        throw new Error("Malformed journey, WaitForNode has no children.");
+      }
+
+      const segmentChildLabelNodeId = segmentChild.labelNodeId;
+      const { timeoutLabelNodeId } = nodeTypeProps;
+      const emptyId = uuid();
+
+      newNodes = newNodes.concat(
+        dualNodeNonJourneyNodes({
+          emptyId,
+          leftId: segmentChildLabelNodeId,
+          rightId: timeoutLabelNodeId,
+          leftLabel: WAIT_FOR_SATISFY_LABEL,
+          rightLabel: waitForTimeoutLabel(nodeTypeProps.timeoutSeconds),
+        })
+      );
+
+      newEdges = edgesForJourneyNode({
+        type: nodeTypeProps.type,
+        nodeId: newTargetId,
+        emptyId,
+        leftId: segmentChildLabelNodeId,
+        rightId: timeoutLabelNodeId,
+        source,
+        target,
+      });
+      break;
+    }
+    case JourneyNodeType.DelayNode: {
+      newEdges = edgesForJourneyNode({
+        type: nodeTypeProps.type,
+        nodeId: newTargetId,
+        source,
+        target,
+      });
+      break;
+    }
+    case JourneyNodeType.MessageNode: {
+      newEdges = edgesForJourneyNode({
+        type: nodeTypeProps.type,
+        nodeId: newTargetId,
+        source,
+        target,
+      });
+      break;
+    }
+    case JourneyNodeType.EntryNode: {
+      throw new Error("Cannot add an entry node");
+    }
+    case JourneyNodeType.ExitNode: {
+      throw new Error("Cannot add an exit node");
+    }
+  }
+
+  addNodes({ nodes: newNodes, edges: newEdges, source, target });
+}
+
+function JourneysBuilderInner({ journeyId }: { journeyId: string }) {
+  const {
+    setNodes,
+    addNodes,
+    setEdges,
+    journeyNodes: nodes,
+    journeyEdges: edges,
+    journeyDraggedComponentType: draggedComponentType,
+    apiBase,
+    workspace,
+    upsertJourneyStats,
+    setJourneyStatsRequest,
+  } = useAppStorePick([
+    "apiBase",
+    "setNodes",
+    "addNodes",
+    "setEdges",
+    "journeyNodes",
+    "journeyEdges",
+    "journeyDraggedComponentType",
+    "workspace",
+    "setJourneyStatsRequest",
+    "upsertJourneyStats",
+  ]);
+
+  useJourneyStats({
+    journeyIds: [journeyId],
+    workspaceId:
+      workspace.type === CompletionStatus.Successful
+        ? workspace.value.id
+        : undefined,
+    apiBase,
+    setJourneyStatsRequest,
+    upsertJourneyStats,
+  });
 
   // this function is called once the node from the sidebar is dropped onto a node in the current graph
   const onDrop: DragEventHandler = (evt: DragEvent<HTMLDivElement>) => {
@@ -195,6 +211,8 @@ function JourneysBuilderInner() {
           nodeType: draggedComponentType,
           source,
           target,
+          addNodes,
+          nodes,
         });
       }
     }
@@ -241,6 +259,7 @@ function JourneysBuilderInner() {
         defaultViewport={{ x: 500, y: 0, zoom: 1 }}
         minZoom={0.2}
         panOnScroll
+        deleteKeyCode={null}
         zoomOnPinch
         nodesDraggable={false}
         nodesConnectable={false}
@@ -261,10 +280,10 @@ function JourneysBuilderInner() {
   );
 }
 
-export default function JourneysBuilder() {
+export default function JourneysBuilder({ journeyId }: { journeyId: string }) {
   return (
     <ReactFlowProvider>
-      <JourneysBuilderInner />
+      <JourneysBuilderInner journeyId={journeyId} />
     </ReactFlowProvider>
   );
 }

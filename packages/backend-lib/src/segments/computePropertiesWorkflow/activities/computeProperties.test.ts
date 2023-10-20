@@ -1,7 +1,7 @@
 import { Segment, Workspace } from "@prisma/client";
-import { uuid4 } from "@temporalio/workflow";
 import { randomUUID } from "crypto";
 import { unwrap } from "isomorphic-lib/src/resultHandling/resultUtils";
+import { mapValues } from "remeda";
 import { Overwrite } from "utility-types";
 
 import {
@@ -9,17 +9,24 @@ import {
   segmentTrackEvent,
 } from "../../../../test/factories/segment";
 import { clickhouseClient, getChCompatibleUuid } from "../../../clickhouse";
+import {
+  EMAIL_EVENTS_UP_NAME,
+  HUBSPOT_INTEGRATION_DEFINITION,
+} from "../../../constants";
+import { EMAIL_EVENTS_UP_DEFINITION } from "../../../integrations/subscriptions";
 import { enrichJourney } from "../../../journeys";
 import prisma, { Prisma } from "../../../prisma";
 import { buildSubscriptionChangeEventInner } from "../../../subscriptionGroups";
 import {
+  ChannelType,
+  EnrichedIntegration,
   EnrichedJourney,
   EnrichedUserProperty,
   InternalEventType,
   JourneyDefinition,
   JourneyNodeType,
   JSONValue,
-  MessageNodeVariantType,
+  RelationalOperators,
   SegmentDefinition,
   SegmentHasBeenOperatorComparator,
   SegmentNodeType,
@@ -35,8 +42,9 @@ import {
   InsertValue,
 } from "../../../userEvents/clickhouse";
 import {
-  enrichedUserProperty,
+  enrichUserProperty,
   findAllUserPropertyAssignments,
+  UserPropertyAssignments,
 } from "../../../userProperties";
 import { computePropertiesPeriod } from "./computeProperties";
 
@@ -84,7 +92,7 @@ describe("compute properties activities", () => {
           id: nodeId1,
           child: JourneyNodeType.ExitNode,
           variant: {
-            type: MessageNodeVariantType.Email,
+            type: ChannelType.Email,
             templateId: randomUUID(),
           },
         },
@@ -149,12 +157,22 @@ describe("compute properties activities", () => {
     }
   >;
 
+  type TestUserPropertyData = Overwrite<
+    Omit<Prisma.UserPropertyCreateInput, "workspaceId" | "workspace">,
+    {
+      definition: UserPropertyDefinition;
+    }
+  >;
+
   describe("computePropertiesPeriod", () => {
     interface TableTest {
       description: string;
+      skip?: boolean;
+      only?: boolean;
       currentTime?: number;
-      // arra with at least one item
-      segments: [TestSegmentData, ...TestSegmentData[]];
+      segments?: TestSegmentData[];
+      userProperties?: TestUserPropertyData[];
+      integrations?: Pick<EnrichedIntegration, "definition" | "name">[];
       events?: {
         eventTimeOffset: number;
         overrides?: (
@@ -162,10 +180,14 @@ describe("compute properties activities", () => {
         ) => Record<string, JSONValue>;
       }[];
       expectedSignals?: {
-        segmentName: string;
+        segmentName?: string;
+        userPropertyName?: string;
+        userPropertyValue?: string;
       }[];
       // map from segment name to value
       expectedSegments?: Record<string, boolean>;
+      // map from user id -> user property name -> value
+      expectedUserProperties?: Record<string, UserPropertyAssignments>;
     }
 
     const broadcastSegmentId = randomUUID();
@@ -173,6 +195,74 @@ describe("compute properties activities", () => {
     const subscriptionGroupId1 = randomUUID();
 
     const tableTests: TableTest[] = [
+      {
+        description:
+          "When a user did submit an identify event but the segment is malformed with an empty path",
+        segments: [
+          {
+            name: "malformed",
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Trait,
+                path: "",
+                operator: {
+                  type: SegmentOperatorType.Equals,
+                  value: "",
+                },
+              },
+              nodes: [],
+            },
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -1000,
+            overrides: segmentIdentifyEvent,
+          },
+        ],
+        expectedSegments: {
+          malformed: false,
+        },
+        expectedSignals: [],
+      },
+      {
+        description:
+          "When a user did submit an identify event but the segment is malformed with an empty path inside of a group",
+        segments: [
+          {
+            name: "malformed",
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.And,
+                children: ["2"],
+              },
+              nodes: [
+                {
+                  id: "2",
+                  type: SegmentNodeType.Trait,
+                  path: "",
+                  operator: {
+                    type: SegmentOperatorType.Equals,
+                    value: "",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -1000,
+            overrides: segmentIdentifyEvent,
+          },
+        ],
+        expectedSegments: {
+          malformed: false,
+        },
+        expectedSignals: [],
+      },
       {
         description:
           "When a user submits a track event with a perform segment it signals appropriately",
@@ -256,6 +346,140 @@ describe("compute properties activities", () => {
         expectedSignals: [
           {
             segmentName: "performed broadcast",
+          },
+        ],
+      },
+      {
+        description:
+          "When a user did submit a track event with a 0 times perform segment it does not signal",
+        segments: [
+          {
+            name: "did not perform",
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Performed,
+                event: "EventName",
+                times: 0,
+              },
+              nodes: [],
+            },
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -1000,
+            overrides: (defaults) =>
+              segmentTrackEvent({
+                ...defaults,
+                event: "EventName",
+              }),
+          },
+        ],
+        expectedSegments: {
+          "did not perform": false,
+        },
+        expectedSignals: [],
+      },
+      {
+        description:
+          "When a user did submit a track event with a >= 1 times perform segment it does signal",
+        segments: [
+          {
+            name: "did perform",
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Performed,
+                event: "EventName",
+                times: 1,
+                timesOperator: RelationalOperators.GreaterThanOrEqual,
+              },
+              nodes: [],
+            },
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -1000,
+            overrides: (defaults) =>
+              segmentTrackEvent({
+                ...defaults,
+                event: "EventName",
+              }),
+          },
+        ],
+        expectedSegments: {
+          "did perform": true,
+        },
+        expectedSignals: [
+          {
+            segmentName: "did perform",
+          },
+        ],
+      },
+      {
+        description:
+          "When a user did not submit a track event with a < 1 times perform segment it signals appropriately",
+        segments: [
+          {
+            name: "did not perform",
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Performed,
+                event: "EventName",
+                times: 1,
+                timesOperator: RelationalOperators.LessThan,
+              },
+              nodes: [],
+            },
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -1000,
+            overrides: segmentIdentifyEvent,
+          },
+        ],
+        expectedSegments: {
+          "did not perform": true,
+        },
+        expectedSignals: [
+          {
+            segmentName: "did not perform",
+          },
+        ],
+      },
+      {
+        description:
+          "When a user did not submit a track event with a 0 times perform segment it signals appropriately",
+        segments: [
+          {
+            name: "did not perform",
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Performed,
+                event: "EventName",
+                times: 0,
+              },
+              nodes: [],
+            },
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -1000,
+            overrides: segmentIdentifyEvent,
+          },
+        ],
+        expectedSegments: {
+          "did not perform": true,
+        },
+        expectedSignals: [
+          {
+            segmentName: "did not perform",
           },
         ],
       },
@@ -361,7 +585,9 @@ describe("compute properties activities", () => {
           },
         ],
         events: [],
-        expectedSegments: {},
+        expectedSegments: {
+          "in opt in subscription group": false,
+        },
         expectedSignals: [],
       },
       {
@@ -445,19 +671,378 @@ describe("compute properties activities", () => {
         },
         expectedSignals: [],
       },
+      {
+        description:
+          "with grouped any of user property defaults to available value from performed",
+        userProperties: [
+          {
+            name: "email",
+            definition: {
+              type: UserPropertyDefinitionType.Group,
+              entry: "any-of",
+              nodes: [
+                {
+                  id: "any-of",
+                  type: UserPropertyDefinitionType.AnyOf,
+                  children: ["trait", "performed"],
+                },
+                {
+                  id: "performed",
+                  type: UserPropertyDefinitionType.Performed,
+                  event: "action",
+                  path: "email",
+                },
+                {
+                  id: "trait",
+                  type: UserPropertyDefinitionType.Trait,
+                  path: "email",
+                },
+              ],
+            },
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -1000,
+            overrides: (defaults) =>
+              segmentIdentifyEvent({
+                ...defaults,
+                userId,
+                traits: {
+                  unrelated: "value",
+                },
+              }),
+          },
+          {
+            eventTimeOffset: -500,
+            overrides: (defaults) =>
+              segmentTrackEvent({
+                ...defaults,
+                userId,
+                event: "action",
+                properties: {
+                  email: "max@email.com",
+                },
+              }),
+          },
+        ],
+        expectedUserProperties: {
+          "user-id-1": {
+            email: "max@email.com",
+          },
+        },
+      },
+      {
+        description:
+          "with performed many, collects all events that match the event name",
+        userProperties: [
+          {
+            name: "relevantEvents",
+            definition: {
+              type: UserPropertyDefinitionType.PerformedMany,
+              or: [
+                {
+                  event: "action1",
+                },
+                {
+                  event: "action2",
+                },
+              ],
+            },
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -500,
+            overrides: (defaults) =>
+              segmentTrackEvent({
+                ...defaults,
+                event: "action3",
+              }),
+          },
+          {
+            eventTimeOffset: -400,
+            overrides: (defaults) =>
+              segmentTrackEvent({
+                ...defaults,
+                event: "action2",
+              }),
+          },
+          {
+            eventTimeOffset: -300,
+            overrides: (defaults) =>
+              segmentTrackEvent({
+                ...defaults,
+                event: "action1",
+                properties: {
+                  some: "value",
+                },
+              }),
+          },
+        ],
+        expectedUserProperties: {
+          "user-id-1": {
+            relevantEvents: [
+              {
+                event: "action2",
+                timestamp: "2023-04-12T21:16:18",
+                properties: {},
+              },
+              {
+                event: "action1",
+                timestamp: "2023-04-12T21:16:18",
+                properties: {
+                  some: "value",
+                },
+              },
+            ],
+          },
+        },
+      },
+      {
+        description: "with a hubspot integration, it signals appropriately",
+        userProperties: [
+          {
+            name: EMAIL_EVENTS_UP_NAME,
+            definition: EMAIL_EVENTS_UP_DEFINITION,
+          },
+        ],
+        events: [
+          {
+            eventTimeOffset: -500,
+            overrides: (defaults) =>
+              segmentTrackEvent({
+                ...defaults,
+                event: InternalEventType.MessageSent,
+                properties: {
+                  some: "property",
+                },
+              }),
+          },
+          {
+            eventTimeOffset: -400,
+            overrides: (defaults) =>
+              segmentTrackEvent({
+                ...defaults,
+                event: InternalEventType.EmailClicked,
+                properties: {
+                  other: "property",
+                },
+              }),
+          },
+          {
+            eventTimeOffset: -300,
+            overrides: (defaults) =>
+              segmentIdentifyEvent({
+                ...defaults,
+                traits: {
+                  status: "onboarding",
+                },
+              }),
+          },
+          {
+            eventTimeOffset: -200,
+            overrides: (defaults) =>
+              segmentIdentifyEvent({
+                ...defaults,
+                userId: "user-id-2",
+                traits: {
+                  unrelated: "value",
+                },
+              }),
+          },
+        ],
+        integrations: [
+          {
+            ...HUBSPOT_INTEGRATION_DEFINITION,
+            definition: {
+              ...HUBSPOT_INTEGRATION_DEFINITION.definition,
+              subscribedSegments: ["onboarding"],
+            },
+          },
+        ],
+        segments: [
+          {
+            name: "active",
+            id: randomUUID(),
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Trait,
+                path: "status",
+                operator: {
+                  type: SegmentOperatorType.Equals,
+                  value: "active",
+                },
+              },
+              nodes: [],
+            },
+          },
+          {
+            name: "onboarding",
+            id: randomUUID(),
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Trait,
+                path: "status",
+                operator: {
+                  type: SegmentOperatorType.Equals,
+                  value: "onboarding",
+                },
+              },
+              nodes: [],
+            },
+          },
+        ],
+        expectedUserProperties: {
+          "user-id-1": {
+            [EMAIL_EVENTS_UP_NAME]: [
+              {
+                event: InternalEventType.MessageSent,
+                properties: {
+                  some: "property",
+                },
+                timestamp: "2023-04-12T21:16:18",
+              },
+              {
+                event: InternalEventType.EmailClicked,
+                properties: {
+                  other: "property",
+                },
+                timestamp: "2023-04-12T21:16:18",
+              },
+            ],
+          },
+          "user-id-2": {},
+        },
+        expectedSignals: [
+          {
+            userPropertyName: EMAIL_EVENTS_UP_NAME,
+            userPropertyValue: JSON.stringify(
+              JSON.stringify([
+                {
+                  event: InternalEventType.MessageSent,
+                  properties: JSON.stringify({
+                    some: "property",
+                  }),
+                  timestamp: "2023-04-12T21:16:18",
+                },
+                {
+                  event: InternalEventType.EmailClicked,
+                  properties: JSON.stringify({
+                    other: "property",
+                  }),
+                  timestamp: "2023-04-12T21:16:18",
+                },
+              ])
+            ),
+          },
+          {
+            segmentName: "onboarding",
+          },
+        ],
+      },
+      {
+        description:
+          "with the exists trait operator confirms that user has trait",
+        events: [
+          {
+            eventTimeOffset: -500,
+            overrides: (defaults) =>
+              segmentIdentifyEvent({
+                ...defaults,
+                traits: {
+                  phone: "1234567890",
+                },
+              }),
+          },
+        ],
+        segments: [
+          {
+            name: "hasPhoneNumber",
+            id: randomUUID(),
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Trait,
+                path: "phone",
+                operator: {
+                  type: SegmentOperatorType.Exists,
+                },
+              },
+              nodes: [],
+            },
+          },
+        ],
+        expectedSegments: {
+          hasPhoneNumber: true,
+        },
+      },
+      {
+        description:
+          "with the exists trait operator confirms that user does not have trait",
+        events: [
+          {
+            eventTimeOffset: -500,
+            overrides: (defaults) =>
+              segmentIdentifyEvent({
+                ...defaults,
+                traits: {
+                  notPhone: "abc",
+                },
+              }),
+          },
+        ],
+        segments: [
+          {
+            name: "hasPhoneNumber",
+            id: randomUUID(),
+            definition: {
+              entryNode: {
+                id: "1",
+                type: SegmentNodeType.Trait,
+                path: "phone",
+                operator: {
+                  type: SegmentOperatorType.Exists,
+                },
+              },
+              nodes: [],
+            },
+          },
+        ],
+        expectedSegments: {
+          hasPhoneNumber: false,
+        },
+      },
     ];
 
     describe("table driven tests", () => {
-      test.each(tableTests)(
+      const only: null | string =
+        tableTests.find((t) => t.only === true)?.description ?? null;
+
+      test.each(
+        tableTests.filter(
+          (t) => t.skip !== true && (only === null || only === t.description)
+        )
+      )(
         "$description",
         async ({
+          description,
           segments: testSegments,
           events = [],
           currentTime = 1681334178956,
+          userProperties: testUserProperties,
+          integrations: testIntegrations,
+          expectedUserProperties,
           expectedSegments,
           expectedSignals,
         }) => {
-          userId = randomUUID();
+          if (only !== null && only !== description) {
+            return;
+          }
+
+          userId = "user-id-1";
 
           const eventPayloads: InsertValue[] = events.map(
             ({ eventTimeOffset, overrides }) => {
@@ -484,86 +1069,168 @@ describe("compute properties activities", () => {
             data: { name: `workspace-${randomUUID()}` },
           });
 
-          const firstSegmentId = testSegments[0].id ?? randomUUID();
-          const results = await Promise.all([
-            prisma().journey.create({
-              data: {
-                workspaceId: workspace.id,
-                name: `user-journey-${randomUUID()}`,
-                definition: basicJourneyDefinition(
-                  randomUUID(),
-                  firstSegmentId
-                ),
-              },
-            }),
-            prisma().segment.createMany({
-              data: testSegments.map((s, i) => ({
-                workspaceId: workspace.id,
-                id: i === 0 ? firstSegmentId : undefined,
-                ...s,
-              })),
-            }),
+          const subscribedJourneys: EnrichedJourney[] = [];
+          const userProperties: EnrichedUserProperty[] = [];
+          const promises: (Promise<unknown> | null)[] = [
             insertUserEvents({
               tableVersion,
               workspaceId: workspace.id,
               events: eventPayloads,
             }),
-          ]);
-          journey = results[0] as EnrichedJourney;
+            testUserProperties?.length
+              ? Promise.all(
+                  testUserProperties.map((up) =>
+                    prisma()
+                      .userProperty.create({
+                        data: {
+                          workspaceId: workspace.id,
+                          ...up,
+                        },
+                      })
+                      .then((up2) =>
+                        userProperties.push(up2 as EnrichedUserProperty)
+                      )
+                  )
+                )
+              : null,
+          ];
+          if (testSegments?.[0]) {
+            const firstSegmentId = testSegments[0].id ?? randomUUID();
+
+            promises.push(
+              prisma()
+                .journey.create({
+                  data: {
+                    workspaceId: workspace.id,
+                    name: `user-journey-${randomUUID()}`,
+                    definition: basicJourneyDefinition(
+                      randomUUID(),
+                      firstSegmentId
+                    ),
+                  },
+                })
+                .then((j) => {
+                  journey = j as EnrichedJourney;
+                  subscribedJourneys.push(journey);
+                })
+            );
+            promises.push(
+              prisma().segment.createMany({
+                data: testSegments.map((s, i) => ({
+                  workspaceId: workspace.id,
+                  id: i === 0 ? firstSegmentId : undefined,
+                  ...s,
+                })),
+              })
+            );
+          }
+
+          if (testIntegrations?.length) {
+            testIntegrations.forEach((integration) => {
+              promises.push(
+                prisma().integration.create({
+                  data: {
+                    workspaceId: workspace.id,
+                    enabled: true,
+                    ...integration,
+                  },
+                })
+              );
+            });
+          }
+
+          await Promise.all(promises);
 
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
             tableVersion,
-            subscribedJourneys: [journey],
-            userProperties: [],
+            subscribedJourneys,
+            userProperties,
           });
 
-          const [createdSegments, createdSegmentAssignments] =
-            await Promise.all([
-              prisma().segment.findMany({
-                where: {
-                  workspaceId: workspace.id,
-                },
-              }),
-              prisma().segmentAssignment.findMany({
-                where: {
-                  workspaceId: workspace.id,
-                },
-                include: {
-                  segment: true,
-                },
-              }),
-            ]);
-
-          for (const { segmentName } of expectedSignals ?? []) {
-            const segmentId = createdSegments.find(
-              (s) => s.name === segmentName
-            )?.id;
-            if (!segmentId) {
-              throw new Error(`Unable to find segment ${segmentName}`);
-            }
-            expect(signalWithStart).toHaveBeenCalledWith(
-              expect.any(Function),
-              expect.objectContaining({
-                signalArgs: [
-                  expect.objectContaining({
-                    segmentId,
-                    currentlyInSegment: true,
-                  }),
-                ],
-              })
-            );
-          }
+          const createdSegments = await prisma().segment.findMany({
+            where: {
+              workspaceId: workspace.id,
+            },
+            include: {
+              SegmentAssignment: true,
+            },
+          });
 
           if (expectedSegments) {
-            const segmentsRecord = createdSegmentAssignments.reduce<
+            const segmentsRecord = createdSegments.reduce<
               Record<string, boolean>
-            >((memo, sa) => {
-              memo[sa.segment.name] = sa.inSegment;
+            >((memo, s) => {
+              memo[s.name] = s.SegmentAssignment[0]?.inSegment ?? false;
               return memo;
             }, {});
             expect(segmentsRecord).toEqual(expectedSegments);
+          }
+
+          if (expectedUserProperties) {
+            await Promise.all(
+              Object.values(
+                mapValues(
+                  expectedUserProperties,
+                  async (expectedValue, uid) => {
+                    const assignments = await findAllUserPropertyAssignments({
+                      workspaceId: workspace.id,
+                      userId: uid,
+                    });
+                    expect(assignments).toEqual(expectedValue);
+                  }
+                )
+              )
+            );
+          }
+
+          for (const {
+            segmentName,
+            userPropertyName,
+            userPropertyValue,
+          } of expectedSignals ?? []) {
+            if (segmentName) {
+              const segmentId = createdSegments.find(
+                (s) => s.name === segmentName
+              )?.id;
+              if (!segmentId) {
+                throw new Error(`Unable to find segment ${segmentName}`);
+              }
+              expect(signalWithStart).toHaveBeenCalledWith(
+                expect.any(Function),
+                expect.objectContaining({
+                  signalArgs: [
+                    expect.objectContaining({
+                      segmentId,
+                      currentlyInSegment: true,
+                    }),
+                  ],
+                })
+              );
+            } else if (userPropertyName && userPropertyValue) {
+              const userPropertyId = userProperties.find(
+                (up) => up.name === userPropertyName
+              )?.id;
+
+              if (!userPropertyId) {
+                throw new Error(
+                  `Unable to find user property ${userPropertyName}`
+                );
+              }
+
+              expect(signalWithStart).toHaveBeenCalledWith(
+                expect.any(Function),
+                expect.objectContaining({
+                  signalArgs: [
+                    expect.objectContaining({
+                      userPropertyId,
+                      value: userPropertyValue,
+                    }),
+                  ],
+                })
+              );
+            }
           }
         }
       );
@@ -619,7 +1286,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -669,7 +1335,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2021-12-31 12:15:00 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -729,7 +1394,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -759,7 +1423,7 @@ describe("compute properties activities", () => {
             };
 
             userProperty = unwrap(
-              enrichedUserProperty(
+              enrichUserProperty(
                 await prisma().userProperty.create({
                   data: {
                     workspaceId: workspace.id,
@@ -777,7 +1441,6 @@ describe("compute properties activities", () => {
             await computePropertiesPeriod({
               currentTime,
               workspaceId: workspace.id,
-              processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
               tableVersion,
               subscribedJourneys: [journey],
               userProperties: [userProperty],
@@ -800,6 +1463,114 @@ describe("compute properties activities", () => {
               workspaceId: workspace.id,
             });
             expect(assignments.email).toBe("example@email.com");
+          });
+        });
+
+        describe("when a malformed user property is specified", () => {
+          let userProperty: EnrichedUserProperty;
+          let userPropertyDefinition: UserPropertyDefinition;
+
+          beforeEach(async () => {
+            userPropertyDefinition = {
+              type: UserPropertyDefinitionType.Trait,
+              path: "",
+            };
+
+            userProperty = unwrap(
+              enrichUserProperty(
+                await prisma().userProperty.create({
+                  data: {
+                    workspaceId: workspace.id,
+                    definition: userPropertyDefinition,
+                    name: "malformed",
+                  },
+                })
+              )
+            );
+          });
+
+          it("also creates that user property and defaults to an empty string", async () => {
+            const currentTime = Date.parse("2022-01-01 00:15:45 UTC");
+
+            await computePropertiesPeriod({
+              currentTime,
+              workspaceId: workspace.id,
+              tableVersion,
+              subscribedJourneys: [journey],
+              userProperties: [userProperty],
+            });
+
+            const assignments = await findAllUserPropertyAssignments({
+              userId,
+              workspaceId: workspace.id,
+            });
+            expect(assignments.malformed).toBeUndefined();
+          });
+        });
+
+        describe("when a perform user property is also specified", () => {
+          let userProperty: EnrichedUserProperty;
+          let userPropertyDefinition: UserPropertyDefinition;
+
+          beforeEach(async () => {
+            userPropertyDefinition = {
+              type: UserPropertyDefinitionType.Performed,
+              event: "purchase",
+              path: "item.name",
+            };
+
+            userProperty = unwrap(
+              enrichUserProperty(
+                await prisma().userProperty.create({
+                  data: {
+                    workspaceId: workspace.id,
+                    definition: userPropertyDefinition,
+                    name: "lastPurchase",
+                  },
+                })
+              )
+            );
+            const trackEvent = segmentTrackEvent({
+              userId,
+              anonymousId,
+              timestamp: "2022-01-01 00:15:05",
+              event: "purchase",
+              properties: {
+                item: {
+                  name: "hat",
+                },
+              },
+            });
+
+            await insertUserEvents({
+              tableVersion,
+              workspaceId: workspace.id,
+              events: [
+                {
+                  processingTime: "2022-01-01 00:15:30",
+                  messageId: randomUUID(),
+                  messageRaw: trackEvent,
+                },
+              ],
+            });
+          });
+
+          it("also creates that user property", async () => {
+            const currentTime = Date.parse("2022-01-01 00:15:45 UTC");
+
+            await computePropertiesPeriod({
+              currentTime,
+              workspaceId: workspace.id,
+              tableVersion,
+              subscribedJourneys: [journey],
+              userProperties: [userProperty],
+            });
+
+            const assignments = await findAllUserPropertyAssignments({
+              userId,
+              workspaceId: workspace.id,
+            });
+            expect(assignments.lastPurchase).toBe("hat");
           });
         });
 
@@ -831,7 +1602,6 @@ describe("compute properties activities", () => {
             await computePropertiesPeriod({
               currentTime,
               workspaceId: workspace.id,
-              processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
               tableVersion,
               subscribedJourneys: [journey],
               userProperties: [],
@@ -886,7 +1656,6 @@ describe("compute properties activities", () => {
             await computePropertiesPeriod({
               currentTime,
               workspaceId: workspace.id,
-              processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
               tableVersion,
               subscribedJourneys: [journey],
               userProperties,
@@ -904,13 +1673,12 @@ describe("compute properties activities", () => {
         });
 
         describe("when activity called twice with the same parameters", () => {
-          it("returns the same results but only sends the signals once", async () => {
+          it("only sends the signals once", async () => {
             const currentTime = Date.parse("2022-01-01 00:15:45 UTC");
 
             await computePropertiesPeriod({
               currentTime,
               workspaceId: workspace.id,
-              processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
               tableVersion,
               subscribedJourneys: [journey],
               userProperties: [],
@@ -919,12 +1687,112 @@ describe("compute properties activities", () => {
             await computePropertiesPeriod({
               currentTime,
               workspaceId: workspace.id,
-              processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
               tableVersion,
               subscribedJourneys: [journey],
               userProperties: [],
             });
             expect(signalWithStart).toBeCalledTimes(1);
+          });
+        });
+
+        describe("when activity called multiple times with the same parameters and an integration", () => {
+          let userProperty: EnrichedUserProperty;
+
+          beforeEach(async () => {
+            await prisma().integration.create({
+              data: {
+                ...HUBSPOT_INTEGRATION_DEFINITION,
+                enabled: true,
+                workspaceId: workspace.id,
+              },
+            });
+
+            userProperty = unwrap(
+              enrichUserProperty(
+                await prisma().userProperty.create({
+                  data: {
+                    workspaceId: workspace.id,
+                    name: EMAIL_EVENTS_UP_NAME,
+                    definition: EMAIL_EVENTS_UP_DEFINITION,
+                  },
+                })
+              )
+            );
+          });
+
+          it("only sends the signal once", async () => {
+            const currentTime = Date.parse("2022-01-01 00:15:45 UTC");
+
+            await insertUserEvents({
+              tableVersion,
+              workspaceId: workspace.id,
+              events: [
+                {
+                  messageId: randomUUID(),
+                  processingTime: "2022-01-01 00:15:45",
+                  messageRaw: segmentTrackEvent({
+                    userId,
+                    event: InternalEventType.MessageSent,
+                    timestamp: "2022-01-01 00:15:15",
+                  }),
+                },
+                {
+                  messageId: randomUUID(),
+                  processingTime: "2022-01-01 00:15:45",
+                  messageRaw: segmentTrackEvent({
+                    userId,
+                    event: InternalEventType.EmailDelivered,
+                    timestamp: "2022-01-01 00:25:15",
+                  }),
+                },
+              ],
+            });
+
+            await computePropertiesPeriod({
+              currentTime,
+              workspaceId: workspace.id,
+              tableVersion,
+              subscribedJourneys: [],
+              userProperties: [userProperty],
+            });
+
+            expect(signalWithStart).toBeCalledTimes(1);
+
+            await insertUserEvents({
+              tableVersion,
+              workspaceId: workspace.id,
+              events: [
+                {
+                  messageId: randomUUID(),
+                  processingTime: "2022-01-01 00:15:45",
+                  messageRaw: segmentTrackEvent({
+                    userId,
+                    event: InternalEventType.EmailOpened,
+                    timestamp: "2022-01-01 00:35:15",
+                  }),
+                },
+              ],
+            });
+
+            await computePropertiesPeriod({
+              currentTime,
+              workspaceId: workspace.id,
+              tableVersion,
+              subscribedJourneys: [],
+              userProperties: [userProperty],
+            });
+
+            expect(signalWithStart).toBeCalledTimes(2);
+
+            await computePropertiesPeriod({
+              currentTime,
+              workspaceId: workspace.id,
+              tableVersion,
+              subscribedJourneys: [],
+              userProperties: [userProperty],
+            });
+
+            expect(signalWithStart).toBeCalledTimes(2);
           });
         });
       });
@@ -957,7 +1825,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -996,7 +1863,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1044,7 +1910,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1091,7 +1956,6 @@ describe("compute properties activities", () => {
             workspaceId: workspace.id,
             currentTime,
             // Fast forward polling period
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:45 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1130,7 +1994,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1184,7 +2047,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1296,7 +2158,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1343,7 +2204,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1421,7 +2281,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1469,7 +2328,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1524,7 +2382,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1550,7 +2407,6 @@ describe("compute properties activities", () => {
               workspaceId: workspace.id,
               currentTime,
               // Fast forward polling period
-              processingTimeLowerBound: Date.parse("2022-01-01 00:15:45 UTC"),
               tableVersion,
               subscribedJourneys: [journey],
               userProperties: [],
@@ -1558,120 +2414,6 @@ describe("compute properties activities", () => {
 
             expect(signalWithStart).not.toHaveBeenCalled();
             expect(signal).not.toHaveBeenCalled();
-          });
-        });
-
-        describe("when a new journey was created in the current polling period", () => {
-          let newlyCreatedJourney: EnrichedJourney;
-          let userId2: string;
-
-          beforeEach(async () => {
-            userId2 = `user-2-${uuid4()}`;
-            newlyCreatedJourney = unwrap(
-              enrichJourney(
-                await prisma().journey.create({
-                  data: {
-                    workspaceId: workspace.id,
-                    name: `user-journey-${randomUUID()}`,
-                    definition: basicJourneyDefinition(uuid4(), segment.id),
-                  },
-                })
-              )
-            );
-
-            // insert additional events within the second polling period
-            await insertUserEvents({
-              tableVersion,
-              workspaceId: workspace.id,
-              events: [
-                {
-                  messageId: randomUUID(),
-                  processingTime: "2022-01-01 00:15:50",
-                  messageRaw: segmentIdentifyEvent({
-                    userId: userId2,
-                    timestamp: "2022-01-01 00:15:00",
-                    traits: {
-                      plan: "paid",
-                    },
-                  }),
-                },
-              ],
-            });
-          });
-
-          it.skip("signals that new journey on all assignments, while only signalling the existing journey on new assignments", async () => {
-            // Fast forward current time
-            const currentTime = Date.parse("2022-01-01 00:16:00 UTC");
-
-            await computePropertiesPeriod({
-              workspaceId: workspace.id,
-              currentTime,
-              // Fast forward polling period
-              processingTimeLowerBound: Date.parse("2022-01-01 00:15:45 UTC"),
-              tableVersion,
-              newComputedIds: { [newlyCreatedJourney.id]: true },
-              subscribedJourneys: [journey, newlyCreatedJourney],
-              userProperties: [],
-            });
-
-            if (!segments[0]) {
-              fail("Test setup bug");
-            }
-
-            expect(signalWithStart).toHaveBeenCalledWith(
-              expect.any(Function),
-              expect.objectContaining({
-                args: [
-                  expect.objectContaining({
-                    journeyId: journey.id,
-                    userId: userId2,
-                  }),
-                ],
-                signalArgs: [
-                  expect.objectContaining({
-                    segmentId: segments[0].id,
-                    currentlyInSegment: true,
-                  }),
-                ],
-              })
-            );
-
-            expect(signalWithStart).toHaveBeenCalledWith(
-              expect.any(Function),
-              expect.objectContaining({
-                args: [
-                  expect.objectContaining({
-                    journeyId: newlyCreatedJourney.id,
-                    userId,
-                  }),
-                ],
-                signalArgs: [
-                  expect.objectContaining({
-                    segmentId: segments[0].id,
-                    currentlyInSegment: true,
-                  }),
-                ],
-              })
-            );
-
-            expect(signalWithStart).toHaveBeenCalledWith(
-              expect.any(Function),
-              expect.objectContaining({
-                args: [
-                  expect.objectContaining({
-                    journeyId: newlyCreatedJourney.id,
-                    userId: userId2,
-                  }),
-                ],
-                signalArgs: [
-                  expect.objectContaining({
-                    segmentId: segments[0].id,
-                    currentlyInSegment: true,
-                  }),
-                ],
-              })
-            );
-            expect(signalWithStart).toHaveBeenCalledTimes(3);
           });
         });
       });
@@ -1703,7 +2445,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             workspaceId: workspace.id,
             currentTime,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [],
@@ -1723,7 +2464,7 @@ describe("compute properties activities", () => {
           };
 
           userProperty = unwrap(
-            enrichedUserProperty(
+            enrichUserProperty(
               await prisma().userProperty.create({
                 data: {
                   workspaceId: workspace.id,
@@ -1740,7 +2481,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             workspaceId: workspace.id,
             currentTime,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:10:15 UTC"),
             tableVersion,
             subscribedJourneys: [journey],
             userProperties: [userProperty],
@@ -1776,7 +2516,6 @@ describe("compute properties activities", () => {
           currentTime = Date.parse("2022-01-01 00:15:45 UTC");
           await computePropertiesPeriod({
             currentTime,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             workspaceId: workspace.id,
             subscribedJourneys: [journey],
@@ -1823,7 +2562,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:20:15 UTC"),
             tableVersion,
             userProperties: [userProperty],
             subscribedJourneys: [journey],
@@ -1901,7 +2639,6 @@ describe("compute properties activities", () => {
           await computePropertiesPeriod({
             currentTime,
             workspaceId: workspace.id,
-            processingTimeLowerBound: Date.parse("2022-01-01 00:15:15 UTC"),
             tableVersion,
             userProperties: [],
             subscribedJourneys: [journey],

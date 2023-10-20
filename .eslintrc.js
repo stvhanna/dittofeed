@@ -17,6 +17,8 @@ module.exports = {
   rules: {
     "@typescript-eslint/no-redeclare": "off",
     "consistent-return": "off",
+    // There's some kind of bug with this rule, which throws the error "Cannot read properties of undefined (reading 'kind')"
+    "@typescript-eslint/return-await": "off",
     "default-case": "off",
     "filenames/no-index": "error",
     "import/prefer-default-export": "off",
@@ -24,6 +26,7 @@ module.exports = {
     "no-labels": "off",
     "no-plusplus": ["error", { allowForLoopAfterthoughts: true }],
     "no-restricted-syntax": "off",
+    "no-void": "off",
     "no-shadow": "off",
     "guard-for-in": "off",
     "simple-import-sort/exports": "error",
@@ -37,6 +40,15 @@ module.exports = {
         ignorePropertyModificationsFor: ["memo"],
       },
     ],
+    "@typescript-eslint/no-unused-vars": [
+      "error",
+      {
+        argsIgnorePattern: "^_",
+        varsIgnorePattern: "^_",
+        caughtErrorsIgnorePattern: "^_",
+      },
+    ],
+    "@typescript-eslint/no-unsafe-enum-comparison": "error",
   },
   root: true,
 };

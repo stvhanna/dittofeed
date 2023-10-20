@@ -19,6 +19,19 @@ export interface InsertUserEventsParams {
   userEvents: InsertUserEvent[];
 }
 
+export async function getCurrentUserEventsTable({
+  workspaceId,
+}: {
+  workspaceId: string;
+}): Promise<string> {
+  const currentTable = await prisma().currentUserEventsTable.findUnique({
+    where: {
+      workspaceId,
+    },
+  });
+  return currentTable?.version ?? config().defaultUserEventsTableVersion;
+}
+
 async function insertUserEventsDirect({
   workspaceId,
   userEvents,
@@ -130,18 +143,40 @@ export async function findManyEvents({
   limit,
   offset = 0,
   tableVersion: tableVersionParam,
+  startDate,
+  endDate,
 }: {
   workspaceId: string;
   tableVersion?: string;
   limit?: number;
   offset?: number;
+  // unix timestamp units ms
+  startDate?: number;
+  endDate?: number;
 }): Promise<UserEventsWithTraits[]> {
   const tableVersion = await getTableVersion({
     workspaceId,
     tableVersion: tableVersionParam,
   });
 
-  const paginationClause = limit ? `LIMIT ${offset},${limit}` : "";
+  const qb = new ClickHouseQueryBuilder();
+  const workspaceIdParam = qb.addQueryValue(workspaceId, "String");
+
+  const paginationClause = limit
+    ? `LIMIT ${qb.addQueryValue(offset, "Int32")},${qb.addQueryValue(
+        limit,
+        "Int32"
+      )}`
+    : "";
+
+  const startDateClause = startDate
+    ? `AND event_time >= ${qb.addQueryValue(startDate, "DateTime64(3)")}`
+    : "";
+
+  const endDateClause = endDate
+    ? `AND event_time <= ${qb.addQueryValue(endDate, "DateTime64(3)")}`
+    : "";
+
   const query = `SELECT
     workspace_id,
     event_type,
@@ -155,16 +190,16 @@ export async function findManyEvents({
     JSONExtractRaw(message_raw, 'traits') AS traits,
     JSONExtractRaw(message_raw, 'properties') AS properties
   FROM ${buildUserEventsTableName(tableVersion)}
-  WHERE workspace_id = {workspaceId:String}
+  WHERE workspace_id = ${workspaceIdParam}
+  ${startDateClause}
+  ${endDateClause}
   ORDER BY event_time DESC, message_id
   ${paginationClause}`;
 
   const resultSet = await clickhouseClient().query({
     query,
     format: "JSONEachRow",
-    query_params: {
-      workspaceId,
-    },
+    query_params: qb.getQueries(),
   });
 
   const results = await resultSet.json<UserEventsWithTraits[]>();
@@ -332,7 +367,7 @@ export async function findEventsCount({
   return results[0]?.event_count ?? 0;
 }
 
-export async function findAllUserTraits({
+export async function findIdentifyTraits({
   workspaceId,
   tableVersion: tableVersionParam,
 }: {

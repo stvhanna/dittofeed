@@ -1,15 +1,19 @@
+import { IncomingHttpHeaders } from "http";
 import { err, ok, Result } from "neverthrow";
 
 import { decodeJwtHeader } from "./auth";
 import config from "./config";
 import prisma from "./prisma";
-import { DFRequestContext } from "./types";
+import { DFRequestContext, Workspace, WorkspaceMemberRole } from "./types";
+
+export const SESSION_KEY = "df-session-key" as const;
 
 export enum RequestContextErrorType {
   Unauthorized = "Unauthorized",
   NotOnboarded = "NotOnboarded",
   EmailNotVerified = "EmailNotVerified",
   ApplicationError = "ApplicationError",
+  NotAuthenticated = "NotAuthenticated",
 }
 
 export interface UnauthorizedError {
@@ -31,52 +35,71 @@ export interface EmailNotVerifiedError {
   type: RequestContextErrorType.EmailNotVerified;
 }
 
+export interface NotAuthenticatedError {
+  type: RequestContextErrorType.NotAuthenticated;
+}
+
 export type RequestContextError =
   | UnauthorizedError
   | NotOnboardedError
   | ApplicationError
-  | EmailNotVerifiedError;
+  | EmailNotVerifiedError
+  | NotAuthenticatedError;
 
-export async function getRequestContext(
-  authorizationToken: string | null
-): Promise<Result<DFRequestContext, RequestContextError>> {
-  const { authMode } = config();
-  if (authMode === "anonymous") {
-    const workspaceId = config().defaultWorkspaceId;
+export type RequestContextResult = Result<
+  DFRequestContext,
+  RequestContextError
+>;
 
-    const workspace = await prisma().workspace.findUnique({
-      where: {
-        id: workspaceId,
-      },
-    });
-    if (!workspace) {
-      return err({
-        type: RequestContextErrorType.NotOnboarded,
-        message: `Workspace ${workspaceId} not found`,
-      });
-    }
-    return ok({
-      workspace: {
-        id: workspace.id,
-        name: workspace.name,
-      },
-      member: {
-        id: "anonymous",
-        email: "anonymous@email.com",
-        emailVerified: true,
-      },
-      memberRoles: [
-        {
-          workspaceId: workspace.id,
-          workspaceMemberId: "anonymous",
-          role: "Admin",
-        },
-      ],
-    });
+async function defaultRoleForDomain({
+  email,
+  memberId,
+}: {
+  email: string;
+  memberId: string;
+}): Promise<(WorkspaceMemberRole & { workspace: Workspace }) | null> {
+  const domain = email.split("@")[1];
+  if (!domain) {
+    return null;
   }
 
-  const { authProvider } = config();
+  const workspace = await prisma().workspace.findFirst({
+    where: {
+      domain,
+    },
+  });
 
+  if (!workspace) {
+    return null;
+  }
+  const role = await prisma().workspaceMemberRole.upsert({
+    where: {
+      workspaceId_workspaceMemberId: {
+        workspaceId: workspace.id,
+        workspaceMemberId: memberId,
+      },
+    },
+    update: {
+      workspaceId: workspace.id,
+      workspaceMemberId: memberId,
+      role: "Admin",
+    },
+    create: {
+      workspaceId: workspace.id,
+      workspaceMemberId: memberId,
+      role: "Admin",
+    },
+  });
+  return { ...role, workspace };
+}
+
+export async function getMultiTenantRequestContext({
+  authorizationToken,
+  authProvider,
+}: {
+  authorizationToken: string | null;
+  authProvider?: string;
+}): Promise<RequestContextResult> {
   if (!authProvider) {
     return err({
       type: RequestContextErrorType.ApplicationError,
@@ -181,7 +204,9 @@ export async function getRequestContext(
   }
 
   // TODO allow users to switch between workspaces
-  const role = member.WorkspaceMemberRole[0];
+  const role =
+    member.WorkspaceMemberRole[0] ??
+    (await defaultRoleForDomain({ email, memberId: member.id }));
 
   if (!role) {
     return err({
@@ -205,6 +230,7 @@ export async function getRequestContext(
       name: member.name ?? undefined,
       nickname: member.nickname ?? undefined,
       picture: member.image ?? undefined,
+      createdAt: member.createdAt.toISOString(),
     },
     workspace: {
       id: role.workspace.id,
@@ -218,4 +244,62 @@ export async function getRequestContext(
       },
     ],
   });
+}
+
+async function getAnonymousRequestContext(): Promise<RequestContextResult> {
+  const workspace = await prisma().workspace.findFirst();
+  if (!workspace) {
+    return err({
+      type: RequestContextErrorType.NotOnboarded,
+      message: `Workspace not found`,
+    });
+  }
+  return ok({
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+    },
+    member: {
+      id: "anonymous",
+      email: "anonymous@email.com",
+      emailVerified: true,
+      createdAt: new Date().toISOString(),
+    },
+    memberRoles: [
+      {
+        workspaceId: workspace.id,
+        workspaceMemberId: "anonymous",
+        role: "Admin",
+      },
+    ],
+  });
+}
+
+export async function getRequestContext(
+  headers: IncomingHttpHeaders
+): Promise<RequestContextResult> {
+  const { authMode } = config();
+  switch (authMode) {
+    case "anonymous": {
+      return getAnonymousRequestContext();
+    }
+    case "single-tenant": {
+      if (headers[SESSION_KEY] !== "true") {
+        return err({
+          type: RequestContextErrorType.NotAuthenticated,
+        });
+      }
+      return getAnonymousRequestContext();
+    }
+    case "multi-tenant": {
+      const authorizationToken =
+        headers.authorization && typeof headers.authorization === "string"
+          ? headers.authorization
+          : null;
+      return getMultiTenantRequestContext({
+        authorizationToken,
+        authProvider: config().authProvider,
+      });
+    }
+  }
 }

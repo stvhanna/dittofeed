@@ -1,12 +1,20 @@
-import { Journey, Segment, UserProperty } from "@prisma/client";
+import {
+  Integration,
+  Journey,
+  Prisma,
+  Segment,
+  UserProperty,
+} from "@prisma/client";
 import { Static, Type } from "@sinclair/typebox";
 import {
   EventType,
+  IntegrationDefinition,
   JourneyDefinition,
   Nullable,
   SegmentDefinition,
   UserPropertyDefinition,
 } from "isomorphic-lib/src/types";
+import { Overwrite } from "utility-types";
 
 export * from "isomorphic-lib/src/types";
 
@@ -34,6 +42,7 @@ export interface ComputedPropertyAssignment {
   segment_value: boolean;
   user_property_value: string;
   processed_for: string;
+  processed_for_type: string;
 }
 
 export const ComputedAssignment = Type.Object({
@@ -45,6 +54,7 @@ export const ComputedAssignment = Type.Object({
   latest_user_property_value: Type.String(),
   max_assigned_at: Type.String(),
   processed_for: Type.String(),
+  processed_for_type: Type.String(),
 });
 
 export type ComputedAssignment = Static<typeof ComputedAssignment>;
@@ -81,15 +91,6 @@ export type SegmentIOEvent = Static<typeof SegmentIOEvent>;
 
 export * from "@prisma/client";
 
-export enum InternalEventType {
-  MessageSent = "DFInternalMessageSent",
-  BadWorkspaceConfiguration = "DFBadWorkspaceConfiguration",
-  MessageFailure = "DFMessageFailure",
-  MessageSkipped = "DFMessageSkipped",
-  SegmentBroadcast = "DFSegmentBroadcast",
-  SubscriptionChange = "DFSubscriptionChange",
-}
-
 export const KafkaSaslMechanism = Type.Union([
   Type.Literal("plain"),
   Type.Literal("scram-sha-256"),
@@ -109,6 +110,7 @@ export type WriteMode = Static<typeof WriteMode>;
 export const AuthMode = Type.Union([
   Type.Literal("anonymous"),
   Type.Literal("multi-tenant"),
+  Type.Literal("single-tenant"),
 ]);
 
 export type AuthMode = Static<typeof AuthMode>;
@@ -125,11 +127,6 @@ export const LogLevel = Type.Union([
 
 export type LogLevel = Static<typeof LogLevel>;
 
-export enum SubscriptionChange {
-  Subscribe = "Subscribe",
-  Unsubscribe = "Unsubscribe",
-}
-
 export const DecodedJwt = Type.Object({
   sub: Type.String(),
   email: Type.String(),
@@ -140,3 +137,53 @@ export const DecodedJwt = Type.Object({
 });
 
 export type DecodedJwt = Static<typeof DecodedJwt>;
+
+export enum SendgridEventType {
+  Processed = "processed",
+  Dropped = "dropped",
+  Deferred = "deferred",
+  Delivered = "delivered",
+  Bounce = "bounce",
+  Open = "open",
+  Click = "click",
+  SpamReport = "spamreport",
+  Unsubscribe = "unsubscribe",
+  GroupUnsubscribe = "group_unsubscribe",
+  GroupResubscribe = "group_resubscribe",
+}
+
+export const SendgridEvent = Type.Intersect([
+  Type.Object({
+    email: Type.String(),
+    timestamp: Type.Integer(),
+    event: Type.Enum(SendgridEventType),
+    sg_event_id: Type.String(),
+    sg_message_id: Type.String(),
+    ip: Type.Optional(Type.String()),
+    reason: Type.Optional(Type.String()),
+    pool: Type.Optional(
+      Type.Object({
+        id: Type.Number(),
+        name: Type.String(),
+      })
+    ),
+  }),
+  Type.Record(Type.String(), Type.String()),
+]);
+
+export type SendgridEvent = Static<typeof SendgridEvent>;
+
+export type IntegrationCreateDefinition = Omit<
+  Overwrite<
+    Prisma.IntegrationUncheckedCreateInput,
+    {
+      definition: IntegrationDefinition;
+    }
+  >,
+  "workspaceId"
+>;
+
+export type EnrichedIntegration = Overwrite<
+  Integration,
+  { definition: IntegrationDefinition }
+>;

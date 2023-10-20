@@ -1,5 +1,4 @@
 import { TypeBoxTypeProvider } from "@fastify/type-provider-typebox";
-import backendConfig from "backend-lib/src/config";
 import {
   BadRequestResponse,
   GetUsersRequest,
@@ -23,9 +22,8 @@ export default async function usersController(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const { defaultWorkspaceId } = backendConfig();
       const result = await getUsers({
-        workspaceId: defaultWorkspaceId,
+        workspaceId: request.query.workspaceId,
         cursor: request.query.cursor,
         direction: request.query.direction,
         segmentId: request.query.segmentId,

@@ -1,11 +1,12 @@
 import {
-  type FontSizeOutlined,
   ClockCircleOutlined,
   DeliveredProcedureOutlined,
+  type FontSizeOutlined,
   ForkOutlined,
   MailOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
+import BackHandOutlined from "@mui/icons-material/BackHandOutlined";
 import {
   Box,
   ClickAwayListener,
@@ -13,23 +14,35 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
+import { round } from "isomorphic-lib/src/numbers";
 import { CompletionStatus, JourneyNodeType } from "isomorphic-lib/src/types";
+import { useRouter } from "next/router";
 import { Handle, NodeProps, Position } from "reactflow";
 
-import { useAppStore } from "../../../lib/appStore";
+import { useAppStore, useAppStorePick } from "../../../lib/appStore";
 import { AppState, JourneyNodeProps, NodeTypeProps } from "../../../lib/types";
 import DurationDescription from "../../durationDescription";
+import journeyNodeLabel from "../journeyNodeLabel";
 import styles from "./nodeTypes.module.css";
+import { JOURNEY_NODE_WIDTH } from "./styles";
+
+export type JourneyNodeIcon = typeof FontSizeOutlined | typeof BackHandOutlined;
 
 interface JourneyNodeConfig {
   sidebarColor: string;
-  icon: typeof FontSizeOutlined;
+  icon: JourneyNodeIcon;
   title: string;
   body?: React.ReactElement | null;
   disableTopHandle?: boolean;
   disableBottomHandle?: boolean;
 }
 
+/**
+ * Validates that journey node can be saved.
+ * @param props
+ * @param state
+ * @returns
+ */
 export function isNodeComplete(
   props: NodeTypeProps,
   state: Pick<AppState, "segments" | "messages">
@@ -55,10 +68,20 @@ export function isNodeComplete(
       return Boolean(props.seconds);
     case JourneyNodeType.SegmentSplitNode:
       return Boolean(props.segmentId);
+    case JourneyNodeType.WaitForNode: {
+      const segmentChild = props.segmentChildren[0];
+      return segmentChild !== undefined && Boolean(segmentChild.segmentId);
+    }
   }
 }
 
-function SegmentDescriptionBody({ segmentId }: { segmentId?: string }) {
+function SegmentDescriptionBody({
+  segmentId,
+  prefix = "User in",
+}: {
+  segmentId?: string;
+  prefix?: string;
+}) {
   const segments = useAppStore((state) => state.segments);
   const theme = useTheme();
 
@@ -71,7 +94,7 @@ function SegmentDescriptionBody({ segmentId }: { segmentId?: string }) {
   }
   return (
     <Stack direction="row" spacing={1} alignItems="center">
-      <Box>User in</Box>
+      <Box>{prefix}</Box>
       <Typography
         sx={{
           padding: 1,
@@ -85,6 +108,27 @@ function SegmentDescriptionBody({ segmentId }: { segmentId?: string }) {
   );
 }
 
+export function journeyNodeIcon(type: JourneyNodeType): JourneyNodeIcon {
+  switch (type) {
+    case JourneyNodeType.EntryNode:
+      return ThunderboltOutlined;
+    case JourneyNodeType.DelayNode:
+      return ClockCircleOutlined;
+    case JourneyNodeType.SegmentSplitNode:
+      return ForkOutlined;
+    case JourneyNodeType.MessageNode:
+      return MailOutlined;
+    case JourneyNodeType.ExitNode:
+      return DeliveredProcedureOutlined;
+    case JourneyNodeType.WaitForNode:
+      return BackHandOutlined;
+    case JourneyNodeType.ExperimentSplitNode:
+      throw new Error("Not implemented");
+    case JourneyNodeType.RateLimitNode:
+      throw new Error("Not implemented");
+  }
+}
+
 function journNodeTypeToConfig(props: NodeTypeProps): JourneyNodeConfig {
   const t = props.type;
   switch (t) {
@@ -92,8 +136,8 @@ function journNodeTypeToConfig(props: NodeTypeProps): JourneyNodeConfig {
       const body = <SegmentDescriptionBody segmentId={props.segmentId} />;
       return {
         sidebarColor: "transparent",
-        icon: ThunderboltOutlined,
-        title: "Entry",
+        icon: journeyNodeIcon(JourneyNodeType.EntryNode),
+        title: journeyNodeLabel(JourneyNodeType.EntryNode),
         disableTopHandle: true,
         body,
       };
@@ -101,15 +145,15 @@ function journNodeTypeToConfig(props: NodeTypeProps): JourneyNodeConfig {
     case JourneyNodeType.DelayNode:
       return {
         sidebarColor: "#F77520",
-        icon: ClockCircleOutlined,
-        title: "Delay",
+        icon: journeyNodeIcon(JourneyNodeType.DelayNode),
+        title: journeyNodeLabel(JourneyNodeType.DelayNode),
         body: <DurationDescription durationSeconds={props.seconds} />,
       };
     case JourneyNodeType.SegmentSplitNode: {
       const body = <SegmentDescriptionBody segmentId={props.segmentId} />;
       return {
         sidebarColor: "#12F7BE",
-        icon: ForkOutlined,
+        icon: journeyNodeIcon(JourneyNodeType.SegmentSplitNode),
         title: props.name,
         body,
       };
@@ -117,7 +161,7 @@ function journNodeTypeToConfig(props: NodeTypeProps): JourneyNodeConfig {
     case JourneyNodeType.MessageNode:
       return {
         sidebarColor: "#03D9F5",
-        icon: MailOutlined,
+        icon: journeyNodeIcon(JourneyNodeType.MessageNode),
         title: props.name,
         body: null,
       };
@@ -125,24 +169,71 @@ function journNodeTypeToConfig(props: NodeTypeProps): JourneyNodeConfig {
       return {
         sidebarColor: "transparent",
         disableBottomHandle: true,
-        icon: DeliveredProcedureOutlined,
-        title: "Exit",
+        icon: journeyNodeIcon(JourneyNodeType.ExitNode),
+        title: journeyNodeLabel(JourneyNodeType.ExitNode),
         body: null,
       };
-    default:
-      throw new Error(`Unimplemented journey node type ${t}`);
+    case JourneyNodeType.WaitForNode: {
+      const segmentChild = props.segmentChildren[0];
+      if (!segmentChild) {
+        throw new Error("Segment child is undefined");
+      }
+      const body = (
+        <SegmentDescriptionBody
+          segmentId={segmentChild.segmentId}
+          prefix="Waits for user to enter"
+        />
+      );
+      return {
+        sidebarColor: "#F7741E",
+        icon: journeyNodeIcon(JourneyNodeType.WaitForNode),
+        title: journeyNodeLabel(JourneyNodeType.WaitForNode),
+        body,
+      };
+    }
   }
 }
 
 const borderRadius = 2;
 
+function StatCategory({ label, rate }: { label: string; rate: number }) {
+  return (
+    <Stack direction="column">
+      <Typography variant="subtitle2">{label}</Typography>
+      <Box
+        sx={{
+          fontFamily: "monospace",
+        }}
+      >
+        {round(rate * 100, 2)}%
+      </Box>
+    </Stack>
+  );
+}
+
 export function JourneyNode({ id, data }: NodeProps<JourneyNodeProps>) {
+  const path = useRouter();
   const theme = useTheme();
-  const segments = useAppStore((store) => store.segments);
-  const messages = useAppStore((store) => store.messages);
+  const {
+    segments,
+    messages,
+    journeySelectedNodeId: selectedNodeId,
+    setSelectedNodeId,
+    journeyStats,
+  } = useAppStorePick([
+    "segments",
+    "messages",
+    "journeySelectedNodeId",
+    "journeyStats",
+    "setSelectedNodeId",
+  ]);
+
+  const { id: journeyId } = path.query;
+  if (!journeyId || typeof journeyId !== "string") {
+    return null;
+  }
+
   const config = journNodeTypeToConfig(data.nodeTypeProps);
-  const setSelectedNodeId = useAppStore((state) => state.setSelectedNodeId);
-  const selectedNodeId = useAppStore((state) => state.journeySelectedNodeId);
   const isSelected = selectedNodeId === id;
 
   const clickInsideHandler = () => {
@@ -192,50 +283,97 @@ export function JourneyNode({ id, data }: NodeProps<JourneyNodeProps>) {
     config.body
   );
 
+  const stats = isSelected && journeyStats[journeyId]?.nodeStats[id];
+
   const contents = (
-    <Box
-      onClick={clickInsideHandler}
+    <Stack
+      direction="column"
+      justifyContent="top"
       sx={{
-        width: 300,
-        display: "flex",
-        flexDirection: "row",
-        backgroundColor: "white",
-        justifyItems: "stretch",
-        cursor: "pointer",
-        borderStyle: "solid",
-        borderRadius,
-        borderColor,
-        borderWidth: 2,
+        position: "relative",
       }}
     >
       <Box
+        onClick={clickInsideHandler}
         sx={{
-          backgroundColor: config.sidebarColor,
-          width: 5,
-          borderTopLeftRadius: borderRadius,
-          borderBottomLeftRadius: borderRadius,
-          borderWidth: "1px 0 1px 1px",
+          width: JOURNEY_NODE_WIDTH,
+          display: "flex",
+          flexDirection: "row",
+          backgroundColor: "white",
+          justifyItems: "stretch",
+          cursor: "pointer",
+          borderStyle: "solid",
+          borderRadius,
           borderColor,
+          borderWidth: 2,
         }}
-      />
-      <Stack direction="column" spacing={1} sx={{ padding: 2, width: "100%" }}>
-        <Stack direction="row" spacing={1} alignItems="center">
-          <config.icon />
-          <Typography
-            variant="h5"
-            sx={{
-              height: "1.5rem",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {config.title}
-          </Typography>
+      >
+        <Box
+          sx={{
+            backgroundColor: config.sidebarColor,
+            width: 5,
+            borderTopLeftRadius: borderRadius,
+            borderBottomLeftRadius: borderRadius,
+            borderWidth: "1px 0 1px 1px",
+            borderColor,
+          }}
+        />
+        <Stack
+          direction="column"
+          spacing={1}
+          sx={{ padding: 2, width: "100%" }}
+        >
+          <Stack direction="row" spacing={1} alignItems="center">
+            <config.icon />
+            <Typography
+              variant="h5"
+              sx={{
+                height: "1.5rem",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {config.title}
+            </Typography>
+          </Stack>
+          {body}
         </Stack>
-        {body}
+      </Box>
+      <Stack
+        direction="row"
+        alignItems="center"
+        justifyContent="space-between"
+        sx={{
+          padding: stats ? 1 : 0,
+          backgroundColor: "white",
+          borderStyle: "solid",
+          width: JOURNEY_NODE_WIDTH,
+          borderBottomLeftRadius: 8,
+          borderBottomRightRadius: 8,
+          borderColor,
+          borderWidth: "0 2px 2px 2px",
+          opacity: stats ? 1 : 0,
+          visibility: stats ? "visible" : "hidden",
+          transition:
+            "height .2s ease, padding-top .2s ease, padding-bottom .2s ease, opacity .2s ease",
+          height: stats ? undefined : 0,
+        }}
+      >
+        {stats ? (
+          <>
+            <StatCategory label="Sent" rate={stats.sendRate} />
+            <StatCategory
+              label="Delivered"
+              rate={stats.channelStats.deliveryRate}
+            />
+            <StatCategory label="Opened" rate={stats.channelStats.openRate} />
+            <StatCategory label="Clicked" rate={stats.channelStats.clickRate} />
+            <StatCategory label="Spam" rate={stats.channelStats.spamRate} />
+          </>
+        ) : null}
       </Stack>
-    </Box>
+    </Stack>
   );
 
   return (
@@ -244,6 +382,7 @@ export function JourneyNode({ id, data }: NodeProps<JourneyNodeProps>) {
         <Handle
           type="target"
           position={Position.Top}
+          id="top"
           className={styles.handle}
         />
       )}
@@ -253,6 +392,7 @@ export function JourneyNode({ id, data }: NodeProps<JourneyNodeProps>) {
       {!config.disableBottomHandle && (
         <Handle
           type="source"
+          id="bottom"
           position={Position.Bottom}
           className={styles.handle}
         />

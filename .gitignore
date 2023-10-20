@@ -134,3 +134,18 @@ Temporary Items
 
 mnt/*
 !mnt/.gitkeep
+
+# Yarn
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+
+.tmp/*
+!.tmp/.gitkeep
+
+.editorconfig

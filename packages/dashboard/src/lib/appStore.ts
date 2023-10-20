@@ -1,5 +1,8 @@
 import {
   CompletionStatus,
+  InternalEventType,
+  RelationalOperators,
+  SecretResource,
   SegmentDefinition,
   SegmentNode,
   SegmentNodeType,
@@ -7,6 +10,7 @@ import {
   SubscriptionGroupType,
 } from "isomorphic-lib/src/types";
 import { useLayoutEffect } from "react";
+import { pick } from "remeda/dist/commonjs/pick";
 import { v4 as uuid } from "uuid";
 import { create, UseBoundStore } from "zustand";
 import createContext from "zustand/context";
@@ -19,6 +23,11 @@ import { AppContents, AppState, PreloadedState } from "./types";
 const zustandContext = createContext<UseStoreState>();
 export const { Provider } = zustandContext;
 export const useAppStore = zustandContext.useStore;
+export function useAppStorePick<K extends keyof AppContents>(
+  params: K[]
+): Pick<AppContents, K> {
+  return useAppStore((store) => pick(store, params));
+}
 
 function removeOrphanedSegmentNodes(segmentDefinition: SegmentDefinition) {
   const nonOrphanNodes = new Set<string>();
@@ -155,7 +164,27 @@ function mapSegmentNodeToNewType(
       };
     }
     case SegmentNodeType.Performed: {
-      throw new Error(`Unimplemented segment node type ${type}.`);
+      return {
+        primary: {
+          type: SegmentNodeType.Performed,
+          id: node.id,
+          event: "",
+          times: 1,
+          timesOperator: RelationalOperators.GreaterThanOrEqual,
+        },
+        secondary: [],
+      };
+    }
+    case SegmentNodeType.Email: {
+      return {
+        primary: {
+          type: SegmentNodeType.Email,
+          id: node.id,
+          templateId: "",
+          event: InternalEventType.MessageSent,
+        },
+        secondary: [],
+      };
     }
     case SegmentNodeType.LastPerformed: {
       throw new Error(`Unimplemented segment node type ${type}.`);
@@ -168,10 +197,11 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
     immer<AppContents>((set, ...remaining) => {
       const appContents: AppContents = {
         apiBase: "",
+        dashboardUrl: "",
+        trackDashboard: false,
         workspace: {
           type: CompletionStatus.NotStarted,
         },
-        signoutUrl: null,
         member: null,
         dataSourceConfigurations: {
           type: CompletionStatus.NotStarted,
@@ -183,9 +213,19 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
         emailProviders: {
           type: CompletionStatus.NotStarted,
         },
-        traits: {
+        smsProviders: [],
+        traits: [],
+        getTraitsRequest: {
           type: CompletionStatus.NotStarted,
         },
+        upsertTraits: (traits) =>
+          set((state) => {
+            state.traits = Array.from(new Set(traits.concat(state.traits)));
+          }),
+        setGetTraitsRequest: (request) =>
+          set((state) => {
+            state.getTraitsRequest = request;
+          }),
         messages: {
           type: CompletionStatus.NotStarted,
         },
@@ -198,8 +238,11 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
         userProperties: {
           type: CompletionStatus.NotStarted,
         },
-
+        writeKeys: [],
+        secrets: [],
         enableSourceControl: preloadedState.enableSourceControl ?? false,
+        enableMobilePush: preloadedState.enableMobilePush ?? false,
+        integrations: [],
 
         // email message state
         emailMessageBody: "",
@@ -208,13 +251,57 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
         emailMessageFrom: "",
         emailMessageUserProperties: {},
         emailMessageUserPropertiesJSON: "",
+        emailMessageReplyTo: "",
+
         emailMessageUpdateRequest: {
           type: CompletionStatus.NotStarted,
+        },
+
+        // mobile push message state
+        mobilePushMessageTitle: "",
+        mobilePushMessageBody: "",
+        mobilePushMesssageImageUrl: "",
+        mobilePushMessageUserProperties: {},
+        mobilePushMessageUserPropertiesJSON: "",
+        mobilePushMessageUpdateRequest: {
+          type: CompletionStatus.NotStarted,
+        },
+
+        // sms message state
+        smsMessageBody: "",
+        smsMessageUpdateRequest: {
+          type: CompletionStatus.NotStarted,
+        },
+        smsMessageUserPropertiesJSON: "",
+        smsMessageUserProperties: {},
+        smsMessageTitle: "",
+        setSmsMessageTitle: (title) =>
+          set((state) => {
+            state.smsMessageTitle = title;
+          }),
+        setSmsUserProperties(properties) {
+          set((state) => {
+            state.smsMessageUserProperties = properties;
+          });
         },
 
         messageTemplateDeleteRequest: {
           type: CompletionStatus.NotStarted,
         },
+
+        // settings page
+        upsertIntegration: (integration) =>
+          set((state) => {
+            const { integrations } = state;
+            for (const existing of integrations) {
+              if (integration.id === existing.id) {
+                Object.assign(existing, integration);
+                return state;
+              }
+            }
+            integrations.push(integration);
+            return state;
+          }),
 
         deleteMessage: (id) =>
           set((state) => {
@@ -240,6 +327,10 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
 
         // segment index view
         segmentDeleteRequest: {
+          type: CompletionStatus.NotStarted,
+        },
+
+        segmentDownloadRequest: {
           type: CompletionStatus.NotStarted,
         },
 
@@ -277,6 +368,11 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
         setSegmentDeleteRequest: (request) =>
           set((state) => {
             state.segmentDeleteRequest = request;
+          }),
+
+        setSegmentDownloadRequest: (request) =>
+          set((state) => {
+            state.segmentDownloadRequest = request;
           }),
 
         // journey index view
@@ -342,11 +438,11 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
           }),
 
         // broadcast update view
-
-        broadcasts: {
+        broadcasts: [],
+        broadcastUpdateRequest: {
           type: CompletionStatus.NotStarted,
         },
-        broadcastUpdateRequest: {
+        broadcastTriggerRequest: {
           type: CompletionStatus.NotStarted,
         },
         editedBroadcast: null,
@@ -366,29 +462,25 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
           set((state) => {
             state.broadcastUpdateRequest = request;
           }),
+        setBroadcastTriggerRequest(request) {
+          set((state) => {
+            state.broadcastTriggerRequest = request;
+          });
+        },
         upsertBroadcast: (broadcast) =>
           set((state) => {
-            let { broadcasts } = state;
-            if (broadcasts.type !== CompletionStatus.Successful) {
-              broadcasts = {
-                type: CompletionStatus.Successful,
-                value: [],
-              };
-              state.broadcasts = broadcasts;
-            }
-            for (const existing of broadcasts.value) {
+            const { broadcasts } = state;
+            for (const existing of broadcasts) {
               if (broadcast.id === existing.id) {
                 Object.assign(existing, broadcast);
                 return state;
               }
             }
-            broadcasts.value.push(broadcast);
+            broadcasts.push(broadcast);
             return state;
           }),
 
-        subscriptionGroups: {
-          type: CompletionStatus.NotStarted,
-        },
+        subscriptionGroups: [],
         subscriptionGroupUpdateRequest: {
           type: CompletionStatus.NotStarted,
         },
@@ -418,32 +510,50 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
           }),
         upsertSubscriptionGroup: (subscriptionGroup) =>
           set((state) => {
-            let { subscriptionGroups } = state;
-            if (subscriptionGroups.type !== CompletionStatus.Successful) {
-              subscriptionGroups = {
-                type: CompletionStatus.Successful,
-                value: [],
-              };
-              state.subscriptionGroups = subscriptionGroups;
-            }
-            for (const existing of subscriptionGroups.value) {
+            const { subscriptionGroups } = state;
+            for (const existing of subscriptionGroups) {
               if (subscriptionGroup.id === existing.id) {
                 Object.assign(existing, subscriptionGroup);
                 return state;
               }
             }
-            subscriptionGroups.value.push(subscriptionGroup);
+            subscriptionGroups.push(subscriptionGroup);
             return state;
           }),
         deleteSubscriptionGroup: (id) =>
           set((state) => {
-            if (state.subscriptionGroups.type !== CompletionStatus.Successful) {
-              return state;
-            }
-            state.subscriptionGroups.value =
-              state.subscriptionGroups.value.filter((m) => m.id !== id);
+            state.subscriptionGroups = state.subscriptionGroups.filter(
+              (m) => m.id !== id
+            );
             return state;
           }),
+        upsertSecrets(secrets) {
+          set((state) => {
+            const secretsToCreate = secrets.reduce<Map<string, SecretResource>>(
+              (map, secret) => {
+                map.set(secret.name, secret);
+                return map;
+              },
+              new Map()
+            );
+            for (const secret of state.secrets) {
+              const newVal = secretsToCreate.get(secret.name);
+              if (newVal) {
+                secret.value = newVal.value;
+                secretsToCreate.delete(secret.name);
+              }
+            }
+
+            state.secrets = state.secrets.concat(
+              Array.from(secretsToCreate.values())
+            );
+          });
+        },
+        deleteSecret(secretName) {
+          set((state) => {
+            state.secrets = state.secrets.filter((s) => s.name !== secretName);
+          });
+        },
 
         // user property update view
         editedUserProperty: null,
@@ -452,12 +562,14 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
           type: CompletionStatus.NotStarted,
         },
 
-        updateUserPropertyDefinition: (definition) =>
+        updateUserPropertyDefinition: (updater) =>
           set((state) => {
             if (!state.editedUserProperty) {
               return state;
             }
-            state.editedUserProperty.definition = definition;
+            state.editedUserProperty.definition = updater(
+              state.editedUserProperty.definition
+            );
             return state;
           }),
 
@@ -519,6 +631,19 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
             emailProviders.value.push(emailProvider);
             return state;
           }),
+
+        upsertSmsProvider: (provider) =>
+          set((state) => {
+            for (const smsProvider of state.smsProviders) {
+              // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+              if (smsProvider.type === provider.type) {
+                Object.assign(smsProvider, provider);
+                return state;
+              }
+            }
+            state.smsProviders.push(provider);
+            return state;
+          }),
         upsertDataSourceConfiguration: (dataSourceConfiguration) =>
           set((state) => {
             let { dataSourceConfigurations } = state;
@@ -559,9 +684,13 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
             journeys.value.push(journey);
             return state;
           }),
-        setEmailMessageProps: (title) =>
+        setEmailMessageTitle: (title) =>
           set((state) => {
             state.emailMessageTitle = title;
+          }),
+        setEmailMessageReplyTo: (replyTo) =>
+          set((state) => {
+            state.emailMessageReplyTo = replyTo;
           }),
         replaceEmailMessageProps: (p) =>
           set((state) => {
@@ -586,6 +715,39 @@ export const initializeStore = (preloadedState: PreloadedState = {}) =>
         setEmailMessageUpdateRequest: (request) =>
           set((state) => {
             state.emailMessageUpdateRequest = request;
+          }),
+        setMobilePushMessageImageUrl: (imageUrl) =>
+          set((state) => {
+            state.mobilePushMesssageImageUrl = imageUrl;
+          }),
+        setMobilePushMessageTitle: (title) =>
+          set((state) => {
+            state.mobilePushMessageTitle = title;
+          }),
+        setMobilePushMessageBody: (body) =>
+          set((state) => {
+            state.mobilePushMessageBody = body;
+          }),
+        setMobilePushMessagePropsJSON: (jsonString) =>
+          set((state) => {
+            state.mobilePushMessageUserPropertiesJSON = jsonString;
+          }),
+        setMobilePushMessageUpdateRequest: (request) =>
+          set((state) => {
+            state.mobilePushMessageUpdateRequest = request;
+          }),
+
+        setSmsMessageBody: (body) =>
+          set((state) => {
+            state.smsMessageBody = body;
+          }),
+        setSmsMessagePropsJSON: (jsonString) =>
+          set((state) => {
+            state.smsMessageUserPropertiesJSON = jsonString;
+          }),
+        setSmsMessageUpdateRequest: (request) =>
+          set((state) => {
+            state.smsMessageUpdateRequest = request;
           }),
         addEditableSegmentChild: (parentId) =>
           set((state) => {

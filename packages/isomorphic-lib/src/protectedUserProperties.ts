@@ -1,8 +1,2 @@
-const protectedUserProperties = new Set<string>([
-  "id",
-  "phone",
-  "email",
-  "anonymousId",
-  "language",
-]);
+const protectedUserProperties = new Set<string>(["id", "anonymousId"]);
 export default protectedUserProperties;

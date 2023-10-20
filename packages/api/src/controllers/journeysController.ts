@@ -1,4 +1,6 @@
 import { TypeBoxTypeProvider } from "@fastify/type-provider-typebox";
+import { getJourneysStats } from "backend-lib/src/journeys";
+import logger from "backend-lib/src/logger";
 import prisma from "backend-lib/src/prisma";
 import {
   DeleteJourneyRequest,
@@ -6,6 +8,8 @@ import {
   Journey,
   JourneyDefinition,
   JourneyResource,
+  JourneyStatsRequest,
+  JourneyStatsResponse,
   Prisma,
   UpsertJourneyResource,
 } from "backend-lib/src/types";
@@ -73,7 +77,12 @@ export default async function journeysController(fastify: FastifyInstance) {
         JourneyDefinition
       );
       if (journeyDefinitionResult.isErr()) {
-        // TODO add logging
+        logger().error(
+          {
+            errors: journeyDefinitionResult.error,
+          },
+          "Failed to validate journey definition"
+        );
         return reply.status(500).send();
       }
       const resource: JourneyResource = {
@@ -121,6 +130,42 @@ export default async function journeysController(fastify: FastifyInstance) {
       }
 
       return reply.status(204).send();
+    }
+  );
+
+  fastify.withTypeProvider<TypeBoxTypeProvider>().get(
+    "/stats",
+    {
+      schema: {
+        description:
+          "Retrieve stats regarding one or more journey's performance.",
+        querystring: JourneyStatsRequest,
+        response: {
+          200: JourneyStatsResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      let journeyIds: string[];
+      if (request.query.journeyIds) {
+        journeyIds = request.query.journeyIds;
+      } else {
+        journeyIds = (
+          await prisma().journey.findMany({
+            where: {
+              workspaceId: request.query.workspaceId,
+            },
+            select: {
+              id: true,
+            },
+          })
+        ).map((journey) => journey.id);
+      }
+      const stats = await getJourneysStats({
+        workspaceId: request.query.workspaceId,
+        journeyIds,
+      });
+      return reply.status(200).send(stats);
     }
   );
 }

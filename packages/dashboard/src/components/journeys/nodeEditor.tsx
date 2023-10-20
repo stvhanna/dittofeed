@@ -1,22 +1,29 @@
-import { Delete } from "@mui/icons-material";
+import { CloseOutlined, Delete } from "@mui/icons-material";
 import {
   Autocomplete,
   Box,
   Button,
+  FormControl,
+  IconButton,
+  InputLabel,
+  MenuItem,
+  Select,
   Stack,
   TextField,
   Typography,
   useTheme,
 } from "@mui/material";
+import { SelectInputProps } from "@mui/material/Select/SelectInput";
 import {
+  ChannelType,
   CompletionStatus,
   JourneyNodeType,
   MessageTemplateResource,
   SegmentResource,
-  SubscriptionGroupResource,
 } from "isomorphic-lib/src/types";
 import { ReactNode, useMemo } from "react";
 import { Node } from "reactflow";
+import { shallow } from "zustand/shallow";
 
 import { useAppStore } from "../../lib/appStore";
 import {
@@ -25,29 +32,16 @@ import {
   JourneyNodeProps,
   MessageNodeProps,
   SegmentSplitNodeProps,
+  WaitForNodeProps,
 } from "../../lib/types";
-import DurationDescription from "../durationDescription";
+import DurationSelect from "../durationSelect";
+import SubscriptionGroupAutocomplete from "../subscriptionGroupAutocomplete";
 import findJourneyNode from "./findJourneyNode";
+import journeyNodeLabel from "./journeyNodeLabel";
+import { waitForTimeoutLabel } from "./store";
 
 const width = 420;
 const transitionDuration = ".15s";
-
-function nodeTypeLabel(t: JourneyNodeType): string {
-  switch (t) {
-    case JourneyNodeType.EntryNode:
-      return "Entry";
-    case JourneyNodeType.SegmentSplitNode:
-      return "Segment Split";
-    case JourneyNodeType.MessageNode:
-      return "Message";
-    case JourneyNodeType.ExitNode:
-      return "Exit";
-    case JourneyNodeType.DelayNode:
-      return "Delay";
-    default:
-      throw new Error(`Unimplemented journey node type ${t}`);
-  }
-}
 
 function getSegmentLabel(tr: SegmentResource) {
   return tr.name;
@@ -147,10 +141,6 @@ function getTemplateLabel(tr: MessageTemplateResource) {
   return tr.name;
 }
 
-function getSubscriptionGroupLabel(sg: SubscriptionGroupResource) {
-  return sg.name;
-}
-
 function MessageNodeFields({
   nodeId,
   nodeProps,
@@ -158,12 +148,14 @@ function MessageNodeFields({
   nodeId: string;
   nodeProps: MessageNodeProps;
 }) {
-  const updateJourneyNodeData = useAppStore(
-    (state) => state.updateJourneyNodeData
-  );
-  const templatesResult = useAppStore((state) => state.messages);
-  const subscriptionGroupsResult = useAppStore(
-    (state) => state.subscriptionGroups
+  const { enableMobilePush, updateJourneyNodeData, messages } = useAppStore(
+    (store) => ({
+      enableMobilePush: store.enableMobilePush,
+      updateJourneyNodeData: store.updateJourneyNodeData,
+      templates: store.messages,
+      messages: store.messages,
+    }),
+    shallow
   );
 
   const onNameChangeHandler: React.ChangeEventHandler<
@@ -189,32 +181,23 @@ function MessageNodeFields({
     });
   };
 
-  const onSubscriptionGroupChangeHandler = (
-    _event: unknown,
-    subscriptionGroup: SubscriptionGroupResource | null
-  ) => {
-    updateJourneyNodeData(nodeId, (node) => {
-      const props = node.data.nodeTypeProps;
-      if (props.type === JourneyNodeType.MessageNode) {
-        props.subscriptionGroupId = subscriptionGroup?.id;
-      }
-    });
-  };
-
   const templates =
-    templatesResult.type === CompletionStatus.Successful
-      ? templatesResult.value
+    messages.type === CompletionStatus.Successful
+      ? messages.value.filter((t) => t.definition?.type === nodeProps.channel)
       : [];
 
   const template = templates.find((t) => t.id === nodeProps.templateId) ?? null;
 
-  const subscriptionGroups =
-    subscriptionGroupsResult.type === CompletionStatus.Successful
-      ? subscriptionGroupsResult.value
-      : [];
-  const subscriptionGroup =
-    subscriptionGroups.find((s) => s.id === nodeProps.subscriptionGroupId) ??
-    null;
+  const onChannelChangeHandler: SelectInputProps<ChannelType>["onChange"] = (
+    e
+  ) => {
+    updateJourneyNodeData(nodeId, (node) => {
+      const props = node.data.nodeTypeProps;
+      if (props.type === JourneyNodeType.MessageNode) {
+        props.channel = e.target.value as ChannelType;
+      }
+    });
+  };
 
   return (
     <>
@@ -223,6 +206,23 @@ function MessageNodeFields({
         value={nodeProps.name}
         onChange={onNameChangeHandler}
       />
+      <FormControl>
+        <InputLabel id="message-channel-select-label">
+          Message Channel
+        </InputLabel>
+        <Select
+          labelId="message-channel-select-label"
+          label="Message Channel"
+          onChange={onChannelChangeHandler}
+          value={nodeProps.channel}
+        >
+          <MenuItem value={ChannelType.Email}>Email</MenuItem>
+          <MenuItem value={ChannelType.Sms}>SMS</MenuItem>
+          <MenuItem disabled={!enableMobilePush} value={ChannelType.MobilePush}>
+            Mobile Push
+          </MenuItem>
+        </Select>
+      </FormControl>
       <Autocomplete
         value={template}
         options={templates}
@@ -232,18 +232,17 @@ function MessageNodeFields({
           <TextField {...params} label="Template" variant="outlined" />
         )}
       />
-      <Autocomplete
-        value={subscriptionGroup}
-        options={subscriptionGroups}
-        getOptionLabel={getSubscriptionGroupLabel}
-        onChange={onSubscriptionGroupChangeHandler}
-        renderInput={(params) => (
-          <TextField
-            {...params}
-            label="Subscription Group"
-            variant="outlined"
-          />
-        )}
+      <SubscriptionGroupAutocomplete
+        subscriptionGroupId={nodeProps.subscriptionGroupId}
+        channel={nodeProps.channel}
+        handler={(subscriptionGroup) => {
+          updateJourneyNodeData(nodeId, (node) => {
+            const props = node.data.nodeTypeProps;
+            if (props.type === JourneyNodeType.MessageNode) {
+              props.subscriptionGroupId = subscriptionGroup?.id;
+            }
+          });
+        }}
       />
     </>
   );
@@ -260,29 +259,93 @@ function DelayNodeFields({
     (state) => state.updateJourneyNodeData
   );
 
-  const handleDurationChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleDurationChange = (seconds: number) => {
     updateJourneyNodeData(nodeId, (node) => {
       const props = node.data.nodeTypeProps;
       if (props.type === JourneyNodeType.DelayNode) {
-        props.seconds = parseInt(e.target.value, 10);
+        props.seconds = seconds;
       }
     });
   };
 
   return (
+    <DurationSelect
+      value={nodeProps.seconds}
+      onChange={handleDurationChange}
+      description="Will wait"
+      inputLabel="Duration"
+    />
+  );
+}
+
+function WaitForNodeFields({
+  nodeId,
+  nodeProps,
+}: {
+  nodeId: string;
+  nodeProps: WaitForNodeProps;
+}) {
+  const { updateJourneyNodeData, segments, updateLabelNode } = useAppStore(
+    (store) => ({
+      updateJourneyNodeData: store.updateJourneyNodeData,
+      segments: store.segments,
+      updateLabelNode: store.updateLabelNode,
+    }),
+    shallow
+  );
+
+  if (segments.type !== CompletionStatus.Successful) {
+    return null;
+  }
+
+  const handleDurationChange = (seconds: number) => {
+    updateJourneyNodeData(nodeId, (node) => {
+      const props = node.data.nodeTypeProps;
+      if (props.type === JourneyNodeType.WaitForNode) {
+        props.timeoutSeconds = seconds;
+      }
+    });
+
+    updateLabelNode(nodeProps.timeoutLabelNodeId, waitForTimeoutLabel(seconds));
+  };
+
+  const onSegmentChangeHandler = (
+    _event: unknown,
+    segment: SegmentResource | null
+  ) => {
+    updateJourneyNodeData(nodeId, (node) => {
+      const props = node.data.nodeTypeProps;
+      if (
+        props.type === JourneyNodeType.WaitForNode &&
+        props.segmentChildren[0]
+      ) {
+        props.segmentChildren[0].segmentId = segment?.id;
+      }
+    });
+  };
+
+  const segment =
+    segments.value.find(
+      (t) => t.id === nodeProps.segmentChildren[0]?.segmentId
+    ) ?? null;
+
+  return (
     <>
-      <TextField
-        label="Duration (Seconds)"
-        InputProps={{
-          type: "number",
-        }}
-        value={String(nodeProps.seconds)}
+      <Autocomplete
+        value={segment}
+        options={segments.value}
+        getOptionLabel={getSegmentLabel}
+        onChange={onSegmentChangeHandler}
+        renderInput={(params) => (
+          <TextField {...params} label="segment" variant="outlined" />
+        )}
+      />
+      <DurationSelect
+        inputLabel="Timeout"
+        description="Will timeout after"
+        value={nodeProps.timeoutSeconds}
         onChange={handleDurationChange}
       />
-
-      <Box>
-        Will wait <DurationDescription durationSeconds={nodeProps.seconds} />
-      </Box>
     </>
   );
 }
@@ -377,10 +440,20 @@ function NodeFields({ node }: { node: Node<JourneyNodeProps> }) {
           <DelayNodeFields nodeId={node.id} nodeProps={nodeProps} />
         </NodeLayout>
       );
+    case JourneyNodeType.WaitForNode:
+      return (
+        <NodeLayout deleteButton nodeId={node.id}>
+          <WaitForNodeFields nodeId={node.id} nodeProps={nodeProps} />
+        </NodeLayout>
+      );
   }
 }
 
 function NodeEditorContents({ node }: { node: Node<JourneyNodeProps> }) {
+  const setSelectedNodeId = useAppStore((state) => state.setSelectedNodeId);
+  const closeNodeEditor = () => {
+    setSelectedNodeId(null);
+  };
   return (
     <Stack
       sx={{
@@ -388,14 +461,20 @@ function NodeEditorContents({ node }: { node: Node<JourneyNodeProps> }) {
         height: "100%",
       }}
     >
-      <Typography
-        variant="h5"
+      <Stack
         sx={{
           padding: 2,
         }}
+        alignItems="center"
+        direction="row"
       >
-        Edit {nodeTypeLabel(node.data.nodeTypeProps.type)}
-      </Typography>
+        <Typography variant="h5" flexGrow={1}>
+          Edit {journeyNodeLabel(node.data.nodeTypeProps.type)}
+        </Typography>
+        <IconButton onClick={closeNodeEditor}>
+          <CloseOutlined />
+        </IconButton>
+      </Stack>
       <NodeFields node={node} />
     </Stack>
   );
@@ -421,15 +500,16 @@ export default function NodeEditor() {
     <Box
       id={journeyNodeEditorId}
       sx={{
-        width,
-        left: isOpen ? 0 : -width,
+        // uses full-width on mobile screens to avoid going off-screen
+        width: `min(100%, ${width}px)`,
+        right: isOpen ? 0 : -width,
         opacity: isOpen ? 1 : 0,
         visibility: isOpen ? "visible" : "hidden",
         height: "100%",
-        transition: `opacity ${transitionDuration} ease,visibility ${transitionDuration},left ${transitionDuration} cubic-bezier(0.820, 0.085, 0.395, 0.895)`,
+        transition: `opacity ${transitionDuration} ease,visibility ${transitionDuration},right ${transitionDuration} cubic-bezier(0.820, 0.085, 0.395, 0.895)`,
         border: `1px solid ${theme.palette.grey[200]}`,
         boxShadow: "0 4px 20px rgb(47 50 106 / 15%)",
-        position: "relative",
+        position: "absolute",
         zIndex: 20,
         backgroundColor: "white",
       }}

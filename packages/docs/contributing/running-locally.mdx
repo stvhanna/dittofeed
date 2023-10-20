@@ -2,43 +2,60 @@
 title: Running Dittofeed Locally
 ---
 
-To run Dittofeed locally, start docker compose, and then run the development bootstrap script.
+To run Dittofeed locally, start docker compose, build the dashboard, and then run the development bootstrap script.
 
 ```bash
-docker compose --profile apps up -d
-# The bootstrap script will run migrations and seed data stores with default
-# resources.
-./scripts/bootstrap-dev.sh
+docker compose up -d
+# Builds all of the dashboard dependencies including those required by the
+# bootstrap script, then runs bootstrap.
+./dev-setup.sh
 ```
 
-## Developing a Dittofeed Service
-
-Dittofeed has three services.
-
-1. Dashboard
-2. API
-3. Worker
-
-If you want to run a particular application while making changes to it, you will
-want to run that application in the foreground outside of docker compose.
-
-### Dashboard
+Then run the service components in separate terminal windows.
 
 ```bash
-docker compose --profile apps-dashboard up -d
 yarn workspace dashboard dev
-```
-
-### API
-
-```bash
-docker compose --profile apps-api up -d
 yarn workspace api dev
+# Optionally
+yarn workspace worker dev
 ```
 
-### Worker
+## Admin CLI
+
+`yarn admin <cmd> [args]` invoke's the `admin-cli` package's CLI, located [here](https://github.com/dittofeed/dittofeed/tree/main/packages/admin-cli). The `admin-cli` provides useful commands for local development as well as operational tasks in production.
+
+## Running with Github Codespaces
+
+Running Dittofeed with Github Codespaces is an easy way to set up a development environment, as they can help rule out idiosyncratic issues with your local environment.
+
+To open a codespace, open vscode, and navigate to the Remote Explorer tab. Then click on the "Open Codespace" button.
+
+From here, select the dittofeed repository, and create a codespace. We recommend using the second tier codespace or higher, to ensure you have enough resources to run the application (4 cores, 8 GB RAM, 32 GB storage).
+
+<Frame>
+![Open Codespace](/images/open-codespace.png)
+</Frame>
+
+## Running Locally With OpenTelemetry
+
+In order to run Dittofeed locally with OpenTelemetry (OTEL), start the API or dashboard with the following environment variables.
+
+<CodeGroup>
+```bash dashboard
+START_OTEL=true yarn workspace dashboard dev
+```
+
+```bash API
+START_OTEL=true yarn workspace api dev
+```
+
+```bash worker
+START_OTEL=true yarn workspace worker dev
+```
+</CodeGroup>
+
+Then run the docker compose dependencies with the otel profile.
 
 ```bash
-docker compose --profile apps-worker up -d
-yarn workspace worker dev
+docker compose --profile otel up -d
 ```

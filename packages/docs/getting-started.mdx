@@ -4,19 +4,23 @@ title: Getting Started
 
 To get started with Dittofeed, you'll need do the following.
 
-1. Deploy Dittofeed. You can self-hosted, or use our cloud offering<sup>*</sup>.
+1. Deploy Dittofeed. You can self-hosted, or use our cloud offering.
 2. Send Dittofeed your user data.
 3. Integrate a messaging channel.
 3. Create a user journey.
-
-<sup>*</sup> **Coming Soon**
 
 Currently, we recommend that users self-host with docker compose, and ingest
 data from segment. We currently support email messaging via sendgrid.
 
 <CardGroup cols={2}>
-  <Card title="Self-Host with Docker Compose" icon="rocket" color="#ea5a0c" href="/deployment/self-hosted/docker-compose">
-    First, deploy your Dittofeed instance with docker compose.
+  <Card
+    title="Self-Host with Render"
+    icon="rocket"
+    color="#ea5a0c"
+    href="/deployment/self-hosted/render"
+
+>
+    First, deploy your Dittofeed instance on Render.
   </Card>
   <Card title="Using Segment.io as an event Source" icon="pipe-section" color="#0285c7" href="/integrations/sources/segment">
     Second, send Dittofeed your user data via Segment.io.
@@ -28,3 +32,8 @@ data from segment. We currently support email messaging via sendgrid.
     Fourth, create your Dittofeed user journey.
   </Card>
 </CardGroup>
+
+
+To see how this all fits together, check out our demo video.
+
+<Snippet file="onboarding-journey-demo.mdx" />

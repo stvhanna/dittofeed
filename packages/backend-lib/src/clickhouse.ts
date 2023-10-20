@@ -1,11 +1,11 @@
-import {
-  ClickHouseClient,
-  ClickHouseClientConfigOptions,
-  createClient,
-} from "@clickhouse/client";
+import { Readable } from "node:stream";
+
+import { ClickHouseClient, createClient } from "@clickhouse/client";
+import { NodeClickHouseClientConfigOptions } from "@clickhouse/client/dist/client";
 import { v4 as uuid } from "uuid";
 
 import config from "./config";
+import logger from "./logger";
 
 export function getChCompatibleUuid() {
   return uuid().replace(/-/g, "_");
@@ -29,7 +29,13 @@ export class ClickHouseQueryBuilder {
   }
 }
 
-function getClientConfig(): ClickHouseClientConfigOptions {
+export interface CreateConfigParams {
+  enableSession?: boolean;
+}
+
+function getClientConfig({
+  enableSession = false,
+}: CreateConfigParams): NodeClickHouseClientConfigOptions {
   const {
     clickhouseHost: host,
     clickhouseDatabase: database,
@@ -37,7 +43,7 @@ function getClientConfig(): ClickHouseClientConfigOptions {
     clickhousePassword: password,
   } = config();
 
-  return {
+  const clientConfig: NodeClickHouseClientConfigOptions = {
     host,
     database,
     username,
@@ -46,12 +52,20 @@ function getClientConfig(): ClickHouseClientConfigOptions {
       date_time_input_format: "best_effort",
     },
   };
+  if (enableSession) {
+    const sessionId = getChCompatibleUuid();
+    logger().info(`ClickHouse session ID: ${sessionId}`);
+    clientConfig.session_id = sessionId;
+  }
+  return clientConfig;
 }
 
-export async function createClickhouseDb() {
+export async function createClickhouseDb(
+  createConfigParams: CreateConfigParams = {}
+) {
   const { clickhouseDatabase: database } = config();
 
-  const clientConfig = getClientConfig();
+  const clientConfig = getClientConfig(createConfigParams);
   clientConfig.database = undefined;
 
   const client = createClient(clientConfig);
@@ -65,11 +79,18 @@ export async function createClickhouseDb() {
   await client.close();
 }
 
-let CLICKHOUSE_CLIENT: ClickHouseClient | null = null;
+export function createClickhouseClient(
+  createConfigParams: CreateConfigParams = {}
+) {
+  const clientConfig = getClientConfig(createConfigParams);
+  return createClient(clientConfig);
+}
+
+let CLICKHOUSE_CLIENT: ClickHouseClient<Readable> | null = null;
 
 export function clickhouseClient() {
   if (CLICKHOUSE_CLIENT === null) {
-    CLICKHOUSE_CLIENT = createClient(getClientConfig());
+    CLICKHOUSE_CLIENT = createClickhouseClient();
   }
   return CLICKHOUSE_CLIENT;
 }

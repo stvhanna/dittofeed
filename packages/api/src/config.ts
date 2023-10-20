@@ -9,7 +9,11 @@ import { Overwrite } from "utility-types";
 const RawConfigProps = {
   nodeEnv: Type.Optional(NodeEnv),
   apiServiceName: Type.Optional(Type.String()),
-  apiPort: Type.Optional(Type.String()),
+  apiPort: Type.Optional(
+    Type.String({
+      format: "naturalNumber",
+    })
+  ),
   apiHost: Type.Optional(Type.String()),
   apiPrefix: Type.Optional(Type.String()),
 };

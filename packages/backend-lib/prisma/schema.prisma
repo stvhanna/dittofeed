@@ -13,6 +13,7 @@ datasource db {
 model Workspace {
   id                     String                   @id() @default(uuid()) @db.Uuid
   name                   String
+  domain                 String?
   createdAt              DateTime                 @default(now())
   updatedAt              DateTime                 @updatedAt
   Segment                Segment[]
@@ -28,8 +29,15 @@ model Workspace {
   Broadcast              Broadcast[]
   SubscriptionGroup      SubscriptionGroup[]
   WorkspaceMemberRole    WorkspaceMemberRole[]
-  Channel                Channel[]
   Secret                 Secret[]
+  WriteKey               WriteKey[]
+  MessageTemplate        MessageTemplate[]
+  OauthToken             OauthToken[]
+  Integration            Integration[]
+  DefaultSmsProvider     DefaultSmsProvider?
+  SmsProvider            SmsProvider[]
+
+  @@unique([name])
 }
 
 enum DBResourceType {
@@ -37,17 +45,24 @@ enum DBResourceType {
   Internal // For Internal Dynamic Resources
 }
 
+enum SegmentStatus {
+  NotStarted
+  Running
+  Paused
+}
+
 model Segment {
   id                  String              @id() @default(uuid()) @db.Uuid
-  workspace           Workspace           @relation(fields: [workspaceId], references: [id])
+  workspace           Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId         String              @db.Uuid
   resourceType        DBResourceType      @default(Declarative)
   name                String
   definition          Json
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
+  status              SegmentStatus       @default(Running)
   subscriptionGroupId String?             @db.Uuid
-  subscriptionGroup   SubscriptionGroup?  @relation(fields: [subscriptionGroupId], references: [id])
+  subscriptionGroup   SubscriptionGroup?  @relation(fields: [subscriptionGroupId], references: [id], onDelete: SetNull)
   SegmentAssignment   SegmentAssignment[]
   Broadcast           Broadcast[]
 
@@ -59,18 +74,21 @@ enum JourneyStatus {
   NotStarted
   Running
   Paused
+  Broadcast
 }
 
 model Journey {
   id               String             @id() @default(uuid()) @db.Uuid
-  workspace        Workspace          @relation(fields: [workspaceId], references: [id])
+  workspace        Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId      String             @db.Uuid
   name             String
   status           JourneyStatus      @default(NotStarted)
   definition       Json
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
+  resourceType     DBResourceType     @default(Declarative)
   UserJourneyEvent UserJourneyEvent[]
+  Broadcast        Broadcast[]
 
   @@unique([workspaceId, name])
 }
@@ -82,26 +100,37 @@ enum DBCompletionStatus {
   Failed
 }
 
+enum DBBroadcastStatus {
+  NotStarted
+  InProgress
+  Triggered
+}
+
 model Broadcast {
-  id          String             @id() @default(uuid()) @db.Uuid
-  workspace   Workspace          @relation(fields: [workspaceId], references: [id])
-  workspaceId String             @db.Uuid
-  segment     Segment            @relation(fields: [segmentId], references: [id], onDelete: Cascade)
-  segmentId   String             @db.Uuid
-  name        String
-  status      DBCompletionStatus @default(NotStarted)
-  triggeredAt DateTime?
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
+  id                String            @id() @default(uuid()) @db.Uuid
+  workspace         Workspace         @relation(fields: [workspaceId], references: [id])
+  workspaceId       String            @db.Uuid
+  segment           Segment?          @relation(fields: [segmentId], references: [id], onDelete: SetNull)
+  segmentId         String?           @db.Uuid
+  journey           Journey?          @relation(fields: [journeyId], references: [id], onDelete: SetNull)
+  journeyId         String?           @db.Uuid
+  messageTemplate   MessageTemplate?  @relation(fields: [messageTemplateId], references: [id], onDelete: SetNull)
+  messageTemplateId String?           @db.Uuid
+  name              String
+  status            DBBroadcastStatus @default(NotStarted)
+  triggeredAt       DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   @@unique([workspaceId, name])
 }
 
 model UserProperty {
   id                     String                   @id() @default(uuid()) @db.Uuid
-  workspace              Workspace                @relation(fields: [workspaceId], references: [id])
+  workspace              Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId            String                   @db.Uuid
   name                   String
+  resourceType           DBResourceType           @default(Declarative)
   definition             Json
   createdAt              DateTime                 @default(now())
   updatedAt              DateTime                 @updatedAt
@@ -111,10 +140,10 @@ model UserProperty {
 }
 
 model SegmentAssignment {
-  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId String    @db.Uuid
   userId      String
-  segment     Segment   @relation(fields: [segmentId], references: [id])
+  segment     Segment   @relation(fields: [segmentId], references: [id], onDelete: Cascade)
   segmentId   String    @db.Uuid
   inSegment   Boolean
 
@@ -122,10 +151,10 @@ model SegmentAssignment {
 }
 
 model UserPropertyAssignment {
-  workspace      Workspace    @relation(fields: [workspaceId], references: [id])
+  workspace      Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId    String       @db.Uuid
   userId         String
-  userProperty   UserProperty @relation(fields: [userPropertyId], references: [id])
+  userProperty   UserProperty @relation(fields: [userPropertyId], references: [id], onDelete: Cascade)
   userPropertyId String       @db.Uuid
   value          String
 
@@ -133,23 +162,40 @@ model UserPropertyAssignment {
   @@index([userId])
 }
 
+// TODO consolidate with generic MessageTemplate
 model EmailTemplate {
   id          String    @id() @default(uuid()) @db.Uuid
-  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId String    @db.Uuid
   name        String
   from        String
   subject     String
   body        String
+  replyTo     String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }
 
+model MessageTemplate {
+  id           String         @id() @default(uuid()) @db.Uuid
+  workspace    Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId  String         @db.Uuid
+  name         String
+  draft        Json?
+  resourceType DBResourceType @default(Declarative)
+  definition   Json?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  Broadcast    Broadcast[]
+
+  @@unique([workspaceId, name])
+}
+
 model DefaultEmailProvider {
-  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId String    @db.Uuid
 
-  emailProvider   EmailProvider @relation(fields: [emailProviderId], references: [id])
+  emailProvider   EmailProvider @relation(fields: [emailProviderId], references: [id], onDelete: Cascade)
   emailProviderId String        @db.Uuid
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
@@ -157,8 +203,20 @@ model DefaultEmailProvider {
   @@unique([workspaceId])
 }
 
+model DefaultSmsProvider {
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String    @db.Uuid
+
+  smsProvider   SmsProvider @relation(fields: [smsProviderId], references: [id], onDelete: Cascade)
+  smsProviderId String      @db.Uuid
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([workspaceId])
+}
+
 model CurrentUserEventsTable {
-  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId String    @db.Uuid
   version     String
   createdAt   DateTime  @default(now())
@@ -169,7 +227,7 @@ model CurrentUserEventsTable {
 
 model EmailProvider {
   id                   String                 @id() @default(uuid()) @db.Uuid
-  workspace            Workspace              @relation(fields: [workspaceId], references: [id])
+  workspace            Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId          String                 @db.Uuid
   type                 String
   apiKey               String
@@ -180,9 +238,23 @@ model EmailProvider {
   @@unique([workspaceId, type])
 }
 
+model SmsProvider {
+  id                 String               @id() @default(uuid()) @db.Uuid
+  workspace          Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId        String               @db.Uuid
+  secretId           String               @db.Uuid
+  secret             Secret               @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  type               String
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  DefaultSmsProvider DefaultSmsProvider[]
+
+  @@unique([workspaceId, type])
+}
+
 model SegmentIOConfiguration {
   id           String    @id() @default(uuid()) @db.Uuid
-  workspace    Workspace @relation(fields: [workspaceId], references: [id])
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId  String    @db.Uuid
   sharedSecret String
   createdAt    DateTime  @default(now())
@@ -195,13 +267,14 @@ model SegmentIOConfiguration {
 model UserJourneyEvent {
   id               String   @id() @default(uuid()) @db.Uuid
   userId           String
-  journeyId        String   @db.Uuid()
-  journey          Journey  @relation(fields: [journeyId], references: [id])
+  nodeId           String?
+  journeyId        String?  @db.Uuid()
+  journey          Journey? @relation(fields: [journeyId], references: [id], onDelete: SetNull)
   type             String
   journeyStartedAt DateTime
   createdAt        DateTime @default(now())
 
-  @@unique([journeyId, userId, type, journeyStartedAt])
+  @@unique([journeyId, userId, type, journeyStartedAt, nodeId])
 }
 
 enum DBSubscriptionGroupType {
@@ -209,14 +282,19 @@ enum DBSubscriptionGroupType {
   OptOut
 }
 
+enum DBChannelType {
+  Email
+  MobilePush
+  Sms
+}
+
 model SubscriptionGroup {
   id          String                  @id() @default(uuid()) @db.Uuid
   workspace   Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId String                  @db.Uuid
   name        String
+  channel     DBChannelType
   type        DBSubscriptionGroupType
-  channelId   String                  @db.Uuid
-  channel     Channel                 @relation(fields: [channelId], references: [id])
   createdAt   DateTime                @default(now())
   updatedAt   DateTime                @updatedAt
   Segment     Segment[]
@@ -273,25 +351,54 @@ model WorkspaceMemberRole {
   @@unique([workspaceId, workspaceMemberId])
 }
 
-model Channel {
-  id                String              @id() @default(uuid()) @db.Uuid
-  workspace         Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  workspaceId       String              @db.Uuid
-  name              String
-  identifier        String
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
-  SubscriptionGroup SubscriptionGroup[]
+model Secret {
+  id          String        @id() @default(uuid()) @db.Uuid
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String        @db.Uuid
+  name        String
+  value       String?
+  configValue Json?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  WriteKey    WriteKey[]
+  SmsProvider SmsProvider[]
 
   @@unique([workspaceId, name])
 }
 
-model Secret {
+model WriteKey {
+  id          String    @id() @default(uuid()) @db.Uuid
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String    @db.Uuid
+  secret      Secret    @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  secretId    String    @db.Uuid
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([workspaceId, secretId])
+}
+
+model OauthToken {
+  id           String    @id() @default(uuid()) @db.Uuid
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId  String    @db.Uuid
+  name         String
+  refreshToken String
+  accessToken  String
+  expiresIn    Int
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([workspaceId, name])
+}
+
+model Integration {
   id          String    @id() @default(uuid()) @db.Uuid
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   workspaceId String    @db.Uuid
   name        String
-  value       String
+  definition  Json
+  enabled     Boolean   @default(true)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 

@@ -1,6 +1,7 @@
 import backendConfig from "backend-lib/src/config";
 import { CompletionStatus, DFRequestContext } from "isomorphic-lib/src/types";
 
+import { apiBase } from "./apiBase";
 import { AppState, PropsWithInitialState } from "./types";
 
 function clone<T>(obj: T): T {
@@ -18,10 +19,19 @@ export function addInitialStateToProps<
   serverInitialState: Partial<AppState>;
   dfContext: DFRequestContext;
 }): T & PropsWithInitialState {
-  const { sourceControlProvider, enableSourceControl } = backendConfig();
+  const {
+    sourceControlProvider,
+    enableSourceControl,
+    signoutUrl,
+    trackDashboard,
+    dashboardWriteKey,
+    enableMobilePush,
+    dashboardUrl,
+  } = backendConfig();
 
   const stateWithEnvVars: Partial<AppState> = clone({
-    apiBase: process.env.DASHBOARD_API_BASE ?? "http://localhost:3001",
+    apiBase: apiBase(),
+    dashboardUrl,
     sourceControlProvider,
     enableSourceControl,
     ...serverInitialState,
@@ -30,8 +40,12 @@ export function addInitialStateToProps<
       value: dfContext.workspace,
     },
     member: dfContext.member,
-    signoutUrl: backendConfig().signoutUrl,
+    signoutUrl,
+    trackDashboard,
+    dashboardWriteKey,
+    enableMobilePush,
   });
+
   return {
     ...props,
     // the "stringify and then parse again" piece is required as next.js

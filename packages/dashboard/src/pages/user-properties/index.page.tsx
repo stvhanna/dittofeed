@@ -8,7 +8,6 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import backendConfig from "backend-lib/src/config";
 import { toUserPropertyResource } from "backend-lib/src/userProperties";
 import protectedUserProperties from "isomorphic-lib/src/protectedUserProperties";
 import {
@@ -32,10 +31,11 @@ import { AppState, PropsWithInitialState } from "../../lib/types";
 
 export const getServerSideProps: GetServerSideProps<PropsWithInitialState> =
   requestContext(async (_ctx, dfContext) => {
-    const workspaceId = backendConfig().defaultWorkspaceId;
+    const workspaceId = dfContext.workspace.id;
+
     const userPropertyResources: UserPropertyResource[] = (
       await prisma().userProperty.findMany({
-        where: { workspaceId },
+        where: { workspaceId, resourceType: "Declarative" },
       })
     ).flatMap((segment) => {
       const result = toUserPropertyResource(segment);

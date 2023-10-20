@@ -1,12 +1,16 @@
-import { Prisma, Segment, SubscriptionGroup } from "@prisma/client";
+import { Segment, SegmentAssignment, SubscriptionGroup } from "@prisma/client";
 import {
   SUBSCRIPTION_MANAGEMENT_PAGE,
   SUBSCRIPTION_SECRET_NAME,
 } from "isomorphic-lib/src/constants";
 import { err, ok, Result } from "neverthrow";
+import path from "path";
 import * as R from "remeda";
+import { URL } from "url";
 import { v4 as uuid } from "uuid";
 
+import { DB_TO_CHANNEL } from "./channels";
+import config from "./config";
 import { generateSecureHash } from "./crypto";
 import logger from "./logger";
 import prisma from "./prisma";
@@ -20,50 +24,90 @@ import {
   SubscriptionGroupType,
   SubscriptionParams,
   UpsertSubscriptionGroupResource,
+  UserSubscriptionAction,
   UserSubscriptionLookup,
   UserSubscriptionResource,
   UserSubscriptionsUpdate,
 } from "./types";
 import { InsertUserEvent, insertUserEvents } from "./userEvents";
 
+export type SubscriptionGroupWithAssignment = SubscriptionGroup & {
+  Segment: (Segment & {
+    SegmentAssignment: SegmentAssignment[];
+  })[];
+};
+
+export interface SubscriptionGroupDetails {
+  id: string;
+  action: UserSubscriptionAction;
+  type: SubscriptionGroupType;
+}
+
+export function getSubscriptionGroupDetails(
+  sg: SubscriptionGroupWithAssignment
+): SubscriptionGroupDetails {
+  let action: UserSubscriptionAction;
+  if (sg.Segment[0]?.SegmentAssignment[0] !== undefined) {
+    action = sg.Segment[0].SegmentAssignment[0].inSegment
+      ? UserSubscriptionAction.Subscribe
+      : UserSubscriptionAction.Unsubscribe;
+  } else {
+    action = null;
+  }
+  return {
+    type:
+      sg.type === "OptIn"
+        ? SubscriptionGroupType.OptIn
+        : SubscriptionGroupType.OptOut,
+    action,
+    id: sg.id,
+  };
+}
+
+export async function getSubscriptionGroupWithAssignment({
+  subscriptionGroupId,
+  userId,
+}: {
+  subscriptionGroupId: string;
+  userId: string;
+}): Promise<SubscriptionGroupWithAssignment | null> {
+  const sg = await prisma().subscriptionGroup.findUnique({
+    where: {
+      id: subscriptionGroupId,
+    },
+    include: {
+      Segment: {
+        include: {
+          SegmentAssignment: {
+            where: {
+              userId,
+            },
+          },
+        },
+      },
+    },
+  });
+  return sg;
+}
+
+// TODO enable a channel type to specified
 export async function upsertSubscriptionGroup({
   id,
   name,
   type,
   workspaceId,
+  channel,
 }: UpsertSubscriptionGroupResource): Promise<Result<SubscriptionGroup, Error>> {
-  const emailChannel = await prisma().channel.findUnique({
-    where: {
-      workspaceId_name: {
-        workspaceId,
-        name: "email",
-      },
-    },
-  });
-
-  if (!emailChannel) {
-    return err(new Error("Email channel not found"));
-  }
-
   const sg = await prisma().$transaction(async (tx) => {
-    const where: Prisma.SubscriptionGroupUpsertArgs["where"] = id
-      ? {
-          id,
-        }
-      : {
-          workspaceId_name: {
-            workspaceId,
-            name,
-          },
-        };
-
     const subscriptionGroup = await tx.subscriptionGroup.upsert({
-      where,
+      where: {
+        id,
+      },
       create: {
         name,
         type,
+        channel,
         workspaceId,
-        channelId: emailChannel.id,
         id,
       },
       update: {
@@ -120,7 +164,9 @@ export function subscriptionGroupToResource(
     id: subscriptionGroup.id,
     workspaceId: subscriptionGroup.workspaceId,
     name: subscriptionGroup.name,
+    channel: DB_TO_CHANNEL[subscriptionGroup.channel],
     type,
+    createdAt: subscriptionGroup.createdAt.getTime(),
   };
 }
 
@@ -181,12 +227,23 @@ export function generateSubscriptionChangeUrl({
     i: identifier,
     ik: identifierKey,
     h: hash,
-    s: changedSubscription,
-    sub: subscriptionChange === SubscriptionChange.Subscribe ? "1" : "0",
   };
-  const queryString = new URLSearchParams(params).toString();
-  const url = `/dashboard${SUBSCRIPTION_MANAGEMENT_PAGE}?${queryString}`;
-  return url;
+  if (changedSubscription) {
+    params.s = changedSubscription;
+    params.sub =
+      subscriptionChange === SubscriptionChange.Subscribe ? "1" : "0";
+  }
+  const url = new URL(config().dashboardUrl);
+  url.pathname = path.join("/dashboard", SUBSCRIPTION_MANAGEMENT_PAGE);
+  url.search = new URLSearchParams(params).toString();
+  const urlString = url.toString();
+  logger().debug(
+    {
+      urlString,
+    },
+    "generated subscription change url"
+  );
+  return urlString;
 }
 
 export function buildSubscriptionChangeEventInner({
@@ -338,7 +395,7 @@ export async function lookupUserForSubscriptions({
   }
 
   // This is a programmatic error, should never happen
-  if (!subscriptionSecret) {
+  if (!subscriptionSecret?.value) {
     throw new Error("Subscription secret not found");
   }
 

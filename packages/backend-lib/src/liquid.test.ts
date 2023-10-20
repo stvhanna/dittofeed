@@ -1,7 +1,6 @@
 import { randomUUID } from "crypto";
 import { SUBSCRIPTION_SECRET_NAME } from "isomorphic-lib/src/constants";
 
-import config from "./config";
 import { renderLiquid } from "./liquid";
 
 const markdownTemplate = `
@@ -69,6 +68,20 @@ const expectedRenderedMarkdownEmail = `
 </html>
 `;
 
+const mjmlTemplate = `
+<mjml>
+  <mj-body>
+    <mj-section>
+      <mj-column>
+        <mj-text align='center'>Dittofeed Example by {{user.name}}</mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>
+`;
+
+const expectedRenderedMjmlTemplate = `Dittofeed Example by Max`;
+
 describe("renderWithUserProperties", () => {
   it("can render markdown that passes email validation", async () => {
     const rendered = renderLiquid({
@@ -105,19 +118,60 @@ describe("renderWithUserProperties", () => {
     expect(rendered.trim()).toEqual(expectedRenderedMarkdownEmail.trim());
   });
 
+  it("can render mjml email layout", async () => {
+    const rendered = renderLiquid({
+      template: mjmlTemplate,
+      workspaceId: randomUUID(),
+      identifierKey: "email",
+      userProperties: {
+        name: "Max",
+      },
+    });
+    expect(rendered.trim()).toEqual(
+      expect.stringContaining(expectedRenderedMjmlTemplate.trim())
+    );
+  });
+
   describe("with all of the necessary values to render un unsubscribe link", () => {
     const unsubscribeTemplate = `
       {% unsubscribe_link %}
     `;
 
     const expectedRenderedUnsubscribeEmail = `
-      <a class="df-unsubscribe" href="/dashboard/subscription-management?w=024f3d0a-8eee-11ed-a1eb-0242ac120002&i=max%40email.com&ik=email&h=c8405195c77e89383ca6e9c4fd787a77bae5445b78dd891e0c30cd186c60a7b9&s=92edd119-3566-4c42-a91a-ff80498a1f57&sub=0">Unsubscribe</a>
+      <a class="df-unsubscribe" clicktracking=off href="http://localhost:3000/dashboard/public/subscription-management?w=024f3d0a-8eee-11ed-a1eb-0242ac120002&i=max%40email.com&ik=email&h=c8405195c77e89383ca6e9c4fd787a77bae5445b78dd891e0c30cd186c60a7b9&s=92edd119-3566-4c42-a91a-ff80498a1f57&sub=0" target="_blank">unsubscribe</a>
     `;
 
     it("can render an unsubscribe link", async () => {
       const rendered = renderLiquid({
         template: unsubscribeTemplate,
-        workspaceId: config().defaultWorkspaceId,
+        workspaceId: "024f3d0a-8eee-11ed-a1eb-0242ac120002",
+        identifierKey: "email",
+        subscriptionGroupId: "92edd119-3566-4c42-a91a-ff80498a1f57",
+        secrets: {
+          [SUBSCRIPTION_SECRET_NAME]: "secret",
+        },
+        userProperties: {
+          email: "max@email.com",
+          id: "123",
+        },
+      });
+      expect(rendered.trim()).toEqual(expectedRenderedUnsubscribeEmail.trim());
+    });
+  });
+
+  describe("when text is passed to the unsubscribe link", () => {
+    const unsubscribeTemplate = `
+      {% unsubscribe_link here %}
+    `;
+
+    const expectedRenderedUnsubscribeEmail = `
+      <a class="df-unsubscribe" clicktracking=off href="http://localhost:3000/dashboard/public/subscription-management?w=024f3d0a-8eee-11ed-a1eb-0242ac120002&i=max%40email.com&ik=email&h=c8405195c77e89383ca6e9c4fd787a77bae5445b78dd891e0c30cd186c60a7b9&s=92edd119-3566-4c42-a91a-ff80498a1f57&sub=0" target="_blank">here</a>
+    `;
+
+    it("can render an unsubscribe link", async () => {
+      const rendered = renderLiquid({
+        template: unsubscribeTemplate,
+        workspaceId: "024f3d0a-8eee-11ed-a1eb-0242ac120002",
         identifierKey: "email",
         subscriptionGroupId: "92edd119-3566-4c42-a91a-ff80498a1f57",
         secrets: {

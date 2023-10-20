@@ -6,8 +6,10 @@
     "light": "/logo/light.png"
   },
   "api": {
-    "baseUrl": "https://api.dittofeed.com",
-    "hidePlayground": true
+    "baseUrl": "https://demo.dittofeed.com",
+    "playground": {
+      "mode": "show"
+    }
   },
   "favicon": "/favicon.png",
   "colors": {
@@ -50,6 +52,7 @@
         {
           "group": "Self-Hosting Options",
           "pages": [
+            "deployment/self-hosted/render",
             "deployment/self-hosted/docker-compose",
             "deployment/self-hosted/kubernetes",
             "deployment/self-hosted/cloudformation"
@@ -64,19 +67,33 @@
         "integrations/sources",
         {
           "group": "Data Source Types",
-          "pages": ["integrations/sources/segment"]
-        },
-        "integrations/destinations",
-        {
-          "group": "Destination Types",
-          "pages": ["integrations/destinations/segment"]
+          "pages": ["integrations/sources/segment", "integrations/sources/api"]
         },
         "integrations/channels",
         {
           "group": "Message Channel Types",
           "pages": [
             "integrations/channels/email",
-            "integrations/channels/sendgrid"
+            "integrations/channels/sendgrid",
+            "integrations/channels/sms",
+            "integrations/channels/twilio"
+          ]
+        },
+        "integrations/sdks",
+        {
+          "group": "Available SDK's",
+          "pages": [
+            "integrations/sdks/web",
+            "integrations/sdks/node",
+            "integrations/sdks/react-native"
+          ]
+        },
+        "integrations/destinations",
+        {
+          "group": "Data Destination Types",
+          "pages": [
+            "integrations/destinations/hubspot",
+            "integrations/destinations/csv"
           ]
         }
       ]
@@ -101,16 +118,38 @@
           "group": "Segment Nodes",
           "pages": [
             "resources/segment-nodes/trait",
+            "resources/segment-nodes/performed",
             "resources/segment-nodes/and",
             "resources/segment-nodes/or",
             "resources/segment-nodes/subscription-group",
-            "resources/segment-nodes/broadcast"
+            "resources/segment-nodes/broadcast",
+            "resources/segment-nodes/email"
           ]
         },
-        "resources/message-templates",
+        "resources/templates",
+        {
+          "group": "Template Types",
+          "pages": [
+            "resources/templates/email-editor",
+            "resources/templates/mjml",
+            "resources/templates/liquid-presets",
+            "resources/templates/free-email-templates",
+            "resources/templates/sms-editor"
+          ]
+        },
         "resources/workspaces",
         "resources/subscription-groups",
         "resources/user-properties",
+        {
+          "group": "User Property Types",
+          "pages": [
+            "resources/user-property-types/trait",
+            "resources/user-property-types/performed",
+            "resources/user-property-types/any-of",
+            "resources/user-property-types/id",
+            "resources/user-property-types/anonymous-id"
+          ]
+        },
         "resources/broadcasts"
       ]
     },
@@ -118,19 +157,30 @@
       "group": "User Guides",
       "pages": [
         "guide/submitting-user-events",
+        "guide/creating-journeys",
         "guide/git-workflows",
         "guide/testing",
-        "guide/monitoring-alerting",
         "guide/license"
       ]
     },
     {
       "group": "API Reference",
-      "pages": ["api-reference/endpoints/webhooks/segment"]
+      "pages": [
+        "api-reference/endpoints/apps/identify",
+        "api-reference/endpoints/apps/track",
+        "api-reference/endpoints/apps/page",
+        "api-reference/endpoints/apps/screen",
+        "api-reference/endpoints/apps/batch",
+        "api-reference/endpoints/subscription-management/user-subscriptions",
+        "api-reference/endpoints/webhooks/segment"
+      ]
     },
     {
       "group": "Contributing",
-      "pages": ["contributing/running-locally", "contributing/updating-api-docs"]
+      "pages": [
+        "contributing/running-locally",
+        "contributing/updating-api-docs"
+      ]
     }
   ],
   "footerSocials": {

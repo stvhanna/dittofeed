@@ -1,9 +1,11 @@
+import { DittofeedSdk as sdk } from "@dittofeed/sdk-web";
 import { Box, Button, Stack, Typography, useTheme } from "@mui/material";
 import {
   CompletionStatus,
   JourneyResource,
   JourneyResourceStatus,
   UpsertJourneyResource,
+  WorkspaceMemberResource,
 } from "isomorphic-lib/src/types";
 import { useRouter } from "next/router";
 
@@ -12,6 +14,7 @@ import InfoTooltip from "../../../components/infoTooltip";
 import JourneyLayout from "../../../components/journeys/layout";
 import apiRequestHandlerFactory from "../../../lib/apiRequestHandlerFactory";
 import { useAppStore } from "../../../lib/appStore";
+import { JOURNEY_STATUS_CHANGE_EVENT } from "../../../lib/constants";
 import {
   JourneyGetServerSideProps,
   journeyGetServerSideProps,
@@ -28,7 +31,8 @@ interface StatusCopy {
   nextStatus?: JourneyResourceStatus;
   disabled?: true;
 }
-const statusValues: Record<JourneyResourceStatus, StatusCopy> = {
+
+const statusValues: Record<"NotStarted" | "Running" | "Paused", StatusCopy> = {
   NotStarted: {
     label: "Not Started",
     nextStatus: "Running",
@@ -56,6 +60,25 @@ const statusValues: Record<JourneyResourceStatus, StatusCopy> = {
   },
 };
 
+function trackStatusChange({
+  member,
+  journeyId,
+  status,
+}: {
+  journeyId: string;
+  member: WorkspaceMemberResource;
+  status: JourneyResourceStatus;
+}) {
+  sdk.track({
+    event: JOURNEY_STATUS_CHANGE_EVENT,
+    userId: member.id,
+    properties: {
+      journeyId,
+      status,
+    },
+  });
+}
+
 function JourneyConfigure() {
   const path = useRouter();
 
@@ -71,14 +94,18 @@ function JourneyConfigure() {
   const journeyName = useAppStore((store) => store.journeyName);
   const setJourneyName = useAppStore((store) => store.setJourneyName);
   const journeys = useAppStore((store) => store.journeys);
+  const workspace = useAppStore((store) => store.workspace);
+  const member = useAppStore((store) => store.member);
 
   const journey =
     journeys.type === CompletionStatus.Successful
       ? journeys.value.find((j) => j.id === id) ?? null
       : null;
 
-  const workspace = useAppStore((store) => store.workspace);
   const theme = useTheme();
+  if (journey?.status === "Broadcast") {
+    throw new Error("Broadcast journeys cannot be configured.");
+  }
   const statusValue: StatusCopy = !journey
     ? {
         label: "Unsaved",
@@ -102,7 +129,16 @@ function JourneyConfigure() {
     request: journeyUpdateRequest,
     setRequest: setJourneyUpdateRequest,
     responseSchema: JourneyResource,
-    setResponse: upsertJourney,
+    setResponse: (response) => {
+      upsertJourney(response);
+      if (member) {
+        trackStatusChange({
+          journeyId: id,
+          member,
+          status: response.status,
+        });
+      }
+    },
     onSuccessNotice: `Updated status for journey ${journeyName} to ${statusValue.nextStatus}.`,
     onFailureNoticeHandler: () =>
       `API Error: Failed to update status for journey ${journeyName} to ${statusValue.nextStatus}.`,

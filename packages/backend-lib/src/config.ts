@@ -1,17 +1,17 @@
 import { Static, Type } from "@sinclair/typebox";
+import { hasProtocol } from "isomorphic-lib/src/urls";
 import { URL } from "url";
 import { Overwrite } from "utility-types";
 
 import { loadConfig, NodeEnvEnum, setConfigOnEnv } from "./config/loader";
 import {
   AuthMode,
+  BoolStr,
   KafkaSaslMechanism,
   LogLevel,
   SourceControlProvider,
   WriteMode,
 } from "./types";
-
-const BoolStr = Type.Union([Type.Literal("true"), Type.Literal("false")]);
 
 const BaseRawConfigProps = {
   databaseUrl: Type.Optional(Type.String()),
@@ -22,6 +22,7 @@ const BaseRawConfigProps = {
   writeMode: Type.Optional(WriteMode),
   temporalAddress: Type.Optional(Type.String()),
   clickhouseHost: Type.String(),
+  clickhouseProtocol: Type.Optional(Type.String()),
   clickhouseDatabase: Type.Optional(Type.String()),
   clickhouseUser: Type.String(),
   clickhousePassword: Type.String(),
@@ -37,7 +38,6 @@ const BaseRawConfigProps = {
   logConfig: Type.Optional(BoolStr),
   bootstrapEvents: Type.Optional(BoolStr),
   bootstrapWorker: Type.Optional(BoolStr),
-  defaultWorkspaceId: Type.Optional(Type.String()),
   defaultIdUserPropertyId: Type.Optional(Type.String()),
   defaultAnonymousIdIdUserPropertyId: Type.Optional(Type.String()),
   defaultEmailUserPropertyId: Type.Optional(Type.String()),
@@ -59,29 +59,78 @@ const BaseRawConfigProps = {
   authProvider: Type.Optional(Type.String()),
   oauthStartUrl: Type.Optional(Type.String()),
   signoutUrl: Type.Optional(Type.String()),
+  trackDashboard: Type.Optional(BoolStr),
+  dashboardWriteKey: Type.Optional(Type.String()),
+  dashboardUrl: Type.Optional(Type.String()),
+  dashboardUrlName: Type.Optional(Type.String()),
+  enableMobilePush: Type.Optional(BoolStr),
+  hubspotClientId: Type.Optional(Type.String()),
+  hubspotClientSecret: Type.Optional(Type.String()),
+  readQueryPageSize: Type.Optional(Type.String({ format: "naturalNumber" })),
+  readQueryConcurrency: Type.Optional(Type.String({ format: "naturalNumber" })),
+  computePropertiesInterval: Type.Optional(
+    Type.String({ format: "naturalNumber" })
+  ),
+  secretKey: Type.Optional(Type.String()),
+  password: Type.Optional(Type.String()),
 };
 
-const BaseRawConfig = Type.Object(BaseRawConfigProps);
+function defaultTemporalAddress(inputURL?: string): string {
+  if (!inputURL) {
+    return "localhost:7233";
+  }
+  const parts = inputURL.split(":");
+  if (parts.length === 1) {
+    return `${parts[0]}:7233`;
+  }
+  return inputURL;
+}
+
+function defaultChUrl(inputURL?: string, protocolOverride?: string): string {
+  if (!inputURL) {
+    return "http://localhost:8123";
+  }
+  let urlToParse: string = inputURL;
+
+  // Prepend a default protocol if the input doesn't seem to have one
+  if (!hasProtocol(inputURL)) {
+    const protocol = protocolOverride ?? "http";
+    urlToParse = `${protocol}://${inputURL}`;
+  }
+
+  const parsedURL = new URL(urlToParse);
+
+  // Check if the URL has a domain
+  if (!parsedURL.hostname) {
+    throw new Error("URL must have a domain");
+  }
+
+  // Default the port to '8123' if not present
+  if (!parsedURL.port) {
+    parsedURL.port = "8123";
+  }
+
+  // Convert the URL object back to a string
+  const newURL = parsedURL.toString();
+
+  return newURL;
+}
 
 // Structure of application config.
 const RawConfig = Type.Union([
-  Type.Intersect([
+  Type.Object({
+    nodeEnv: Type.Literal(NodeEnvEnum.Production),
+    ...BaseRawConfigProps,
+  }),
+  Type.Partial(
     Type.Object({
-      nodeEnv: Type.Literal(NodeEnvEnum.Production),
-    }),
-    BaseRawConfig,
-  ]),
-  Type.Intersect([
-    Type.Object({
-      nodeEnv: Type.Optional(
-        Type.Union([
-          Type.Literal(NodeEnvEnum.Development),
-          Type.Literal(NodeEnvEnum.Test),
-        ])
-      ),
-    }),
-    Type.Partial(BaseRawConfig),
-  ]),
+      nodeEnv: Type.Union([
+        Type.Literal(NodeEnvEnum.Development),
+        Type.Literal(NodeEnvEnum.Test),
+      ]),
+      ...BaseRawConfigProps,
+    })
+  ),
 ]);
 
 type RawConfig = Static<typeof RawConfig>;
@@ -113,9 +162,14 @@ export type Config = Overwrite<
     googleOps: boolean;
     enableSourceControl: boolean;
     authMode: AuthMode;
+    trackDashboard: boolean;
+    dashboardUrl: string;
+    enableMobilePush: boolean;
+    readQueryPageSize: number;
+    readQueryConcurrency: number;
+    computePropertiesInterval: number;
   }
 > & {
-  defaultWorkspaceId: string;
   defaultUserEventsTableVersion: string;
 };
 
@@ -135,29 +189,19 @@ function parseDatabaseUrl(rawConfig: RawConfig) {
   }
 
   if (
-    rawConfig.databaseUser &&
-    rawConfig.databasePassword &&
-    rawConfig.databaseHost &&
-    rawConfig.databasePort
+    rawConfig.nodeEnv === NodeEnvEnum.Production &&
+    !(rawConfig.databaseUser && rawConfig.databasePassword)
   ) {
-    const url = new URL(
-      `postgresql://${rawConfig.databaseUser}:${rawConfig.databasePassword}@${rawConfig.databaseHost}:${rawConfig.databasePort}/dittofeed`
-    );
-    url.search = new URLSearchParams({
-      ...defaultDbParams,
-    }).toString();
-
-    return url.toString();
+    throw new Error("In production must provide database credentials");
   }
 
-  if (rawConfig.nodeEnv === "production") {
-    throw new Error(
-      "In production must either specify databaseUrl or all of databaseUser, databasePassword, databaseHost, databasePort"
-    );
-  }
+  const databaseUser = rawConfig.databaseUser ?? "postgres";
+  const databasePassword = rawConfig.databasePassword ?? "password";
+  const databaseHost = rawConfig.databaseHost ?? "localhost";
+  const databasePort = rawConfig.databasePort ?? "5432";
 
   const url = new URL(
-    "postgresql://postgres:password@localhost:5432/dittofeed"
+    `postgresql://${databaseUser}:${databasePassword}@${databaseHost}:${databasePort}/dittofeed`
   );
   url.search = new URLSearchParams({
     ...defaultDbParams,
@@ -187,16 +231,37 @@ function parseToNumber({
   return coerced;
 }
 
+function buildDashboardUrl({
+  nodeEnv,
+  dashboardUrl,
+  dashboardUrlName,
+}: {
+  nodeEnv: NodeEnvEnum;
+  dashboardUrl?: string;
+  dashboardUrlName?: string;
+}): string {
+  const specifiedDashboardUrl =
+    dashboardUrlName && process.env[dashboardUrlName]
+      ? process.env[dashboardUrlName]
+      : dashboardUrl;
+  if (specifiedDashboardUrl) {
+    return specifiedDashboardUrl;
+  }
+  return nodeEnv === NodeEnvEnum.Development || nodeEnv === NodeEnvEnum.Test
+    ? "http://localhost:3000"
+    : "https://dittofeed.com";
+}
+
 function parseRawConfig(rawConfig: RawConfig): Config {
   const databaseUrl = parseDatabaseUrl(rawConfig);
   const clickhouseDatabase =
     rawConfig.clickhouseDatabase ??
-    (rawConfig.nodeEnv === "test" ? "dittofeed_test" : "dittofeed");
+    (rawConfig.nodeEnv === NodeEnvEnum.Test ? "dittofeed_test" : "dittofeed");
 
   const nodeEnv = rawConfig.nodeEnv ?? NodeEnvEnum.Development;
   const writeMode: WriteMode =
     rawConfig.writeMode ??
-    (rawConfig.nodeEnv === "test" ? "ch-sync" : "ch-async");
+    (rawConfig.nodeEnv === NodeEnvEnum.Test ? "ch-sync" : "ch-async");
 
   let logLevel: LogLevel;
   if (rawConfig.logLevel) {
@@ -213,14 +278,27 @@ function parseRawConfig(rawConfig: RawConfig): Config {
         logLevel = "error";
     }
   }
+
+  const authMode = rawConfig.authMode ?? "anonymous";
+  const { secretKey } = rawConfig;
+
+  if (authMode === "single-tenant" && (!secretKey || !rawConfig.password)) {
+    throw new Error(
+      "In single-tenant mode must specify secretKey and password"
+    );
+  }
+
   const parsedConfig: Config = {
     ...rawConfig,
     nodeEnv,
     writeMode,
-    temporalAddress: rawConfig.temporalAddress ?? "localhost:7233",
+    temporalAddress: defaultTemporalAddress(rawConfig.temporalAddress),
     databaseUrl,
     clickhouseDatabase,
-    clickhouseHost: rawConfig.clickhouseHost ?? "http://localhost:8123",
+    clickhouseHost: defaultChUrl(
+      rawConfig.clickhouseHost,
+      rawConfig.clickhouseProtocol
+    ),
     clickhouseUser: rawConfig.clickhouseUser ?? "dittofeed",
     clickhousePassword: rawConfig.clickhousePassword ?? "password",
     kafkaBrokers: rawConfig.kafkaBrokers
@@ -243,8 +321,6 @@ function parseRawConfig(rawConfig: RawConfig): Config {
     userEventsTopicName:
       rawConfig.userEventsTopicName ?? "dittofeed-user-events",
     temporalNamespace: rawConfig.temporalNamespace ?? "default",
-    defaultWorkspaceId:
-      rawConfig.defaultWorkspaceId ?? "024f3d0a-8eee-11ed-a1eb-0242ac120002",
     // UUID with _ instead of - for clickhouse compatibility
     defaultUserEventsTableVersion:
       rawConfig.defaultUserEventsTableVersion ??
@@ -260,10 +336,33 @@ function parseRawConfig(rawConfig: RawConfig): Config {
     otelCollector: rawConfig.otelCollector ?? "http://localhost:4317",
     prettyLogs:
       rawConfig.prettyLogs === "true" ||
-      (nodeEnv === NodeEnvEnum.Development && rawConfig.prettyLogs !== "false"),
+      ((nodeEnv === NodeEnvEnum.Development || nodeEnv === NodeEnvEnum.Test) &&
+        rawConfig.prettyLogs !== "false"),
     logLevel,
     enableSourceControl: rawConfig.enableSourceControl === "true",
-    authMode: rawConfig.authMode ?? "anonymous",
+    authMode,
+    dashboardUrl: buildDashboardUrl({
+      nodeEnv,
+      dashboardUrl: rawConfig.dashboardUrl,
+      dashboardUrlName: rawConfig.dashboardUrlName,
+    }),
+    trackDashboard: rawConfig.trackDashboard === "true",
+    enableMobilePush: rawConfig.enableMobilePush === "true",
+    readQueryPageSize: rawConfig.readQueryPageSize
+      ? Number(rawConfig.readQueryPageSize)
+      : 200,
+    readQueryConcurrency: rawConfig.readQueryConcurrency
+      ? Number(rawConfig.readQueryConcurrency)
+      : 2,
+    // 30 seconds in ms
+    computePropertiesInterval: rawConfig.computePropertiesInterval
+      ? Number(rawConfig.computePropertiesInterval)
+      : 30 * 1000,
+    signoutUrl:
+      authMode === "single-tenant"
+        ? "/api/public/single-tenant/signout"
+        : rawConfig.signoutUrl,
+    secretKey,
   };
   return parsedConfig;
 }

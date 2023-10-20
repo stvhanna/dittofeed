@@ -1,5 +1,6 @@
 import { clickhouseClient } from "../clickhouse";
 import config from "../config";
+import { NodeEnvEnum } from "../config/loader";
 import logger from "../logger";
 import prisma from "../prisma";
 import { ComputedPropertyAssignment, JSONValue } from "../types";
@@ -35,7 +36,7 @@ export async function insertProcessedComputedProperties({
 }) {
   await clickhouseClient().insert({
     table:
-      "processed_computed_properties (workspace_id, user_id, type, computed_property_id, segment_value, user_property_value, processed_for)",
+      "processed_computed_properties (workspace_id, user_id, type, computed_property_id, segment_value, user_property_value, processed_for, processed_for_type)",
     values: assignments,
     format: "JSONEachRow",
   });
@@ -124,14 +125,16 @@ export async function createUserEventsTables({
             segment_value Boolean,
             user_property_value String,
             processed_for LowCardinality(String),
+            processed_for_type LowCardinality(String),
             processed_at DateTime64(3) DEFAULT now64(3)
         ) Engine = ReplacingMergeTree()
-        ORDER BY (workspace_id, computed_property_id, user_id, processed_for);
+        ORDER BY (workspace_id, computed_property_id, processed_for_type, processed_for, user_id);
       `,
   ];
 
   const kafkaBrokers =
-    config().nodeEnv === "test" || config().nodeEnv === "development"
+    config().nodeEnv === NodeEnvEnum.Test ||
+    config().nodeEnv === NodeEnvEnum.Development
       ? "kafka:29092"
       : config().kafkaBrokers.join(",");
 

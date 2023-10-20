@@ -1,20 +1,30 @@
 import { TypeBoxTypeProvider } from "@fastify/type-provider-typebox";
 import { renderLiquid } from "backend-lib/src/liquid";
 import logger from "backend-lib/src/logger";
+import {
+  sendMessage,
+  upsertMessageTemplate,
+} from "backend-lib/src/messageTemplates";
 import prisma from "backend-lib/src/prisma";
-import { EmailTemplate, Prisma } from "backend-lib/src/types";
+import { Prisma } from "backend-lib/src/types";
 import { FastifyInstance } from "fastify";
+import { CHANNEL_IDENTIFIERS } from "isomorphic-lib/src/channels";
 import { SUBSCRIPTION_SECRET_NAME } from "isomorphic-lib/src/constants";
 import {
+  BadWorkspaceConfigurationType,
+  ChannelType,
   DeleteMessageTemplateRequest,
-  EmailTemplateResource,
+  EmailProviderType,
   EmptyResponse,
+  InternalEventType,
   JsonResultType,
+  MessageSkippedType,
   MessageTemplateResource,
+  MessageTemplateTestRequest,
+  MessageTemplateTestResponse,
   RenderMessageTemplateRequest,
   RenderMessageTemplateResponse,
   RenderMessageTemplateResponseContent,
-  TemplateResourceType,
   UpsertMessageTemplateResource,
 } from "isomorphic-lib/src/types";
 import * as R from "remeda";
@@ -37,46 +47,40 @@ export default async function contentController(fastify: FastifyInstance) {
         contents,
         workspaceId,
         subscriptionGroupId,
-        channel: channelName,
+        channel,
         userProperties,
       } = request.body;
 
-      const [channel, secrets] = await Promise.all([
-        prisma().channel.findUnique({
-          where: {
-            workspaceId_name: {
-              name: channelName,
-              workspaceId,
-            },
+      const secrets = await prisma().secret.findMany({
+        where: {
+          workspaceId,
+          name: {
+            in: [SUBSCRIPTION_SECRET_NAME],
           },
-        }),
-        prisma().secret.findMany({
-          where: {
-            workspaceId,
-            name: {
-              in: [SUBSCRIPTION_SECRET_NAME],
-            },
-          },
-        }),
-      ]);
+        },
+      });
 
-      const templateSecrets = R.mapToObj(secrets, (secret) => [
-        secret.name,
-        secret.value,
-      ]);
+      const templateSecrets: Record<string, string> = {};
+      for (const secret of secrets) {
+        if (!secret.value) {
+          continue;
+        }
+        templateSecrets[secret.name] = secret.value;
+      }
 
-      let responseContents: RenderMessageTemplateResponse["contents"] = {};
+      const identifierKey = CHANNEL_IDENTIFIERS[channel];
 
-      if (channel) {
-        responseContents = R.mapValues(contents, (content) => {
+      const responseContents: RenderMessageTemplateResponse["contents"] =
+        R.mapValues(contents, (content) => {
           let value: RenderMessageTemplateResponseContent;
           try {
             const rendered = renderLiquid({
               workspaceId,
-              template: content,
+              template: content.value,
+              mjml: content.mjml,
               subscriptionGroupId,
               userProperties,
-              identifierKey: channel.identifier,
+              identifierKey,
               secrets: templateSecrets,
             });
             value = {
@@ -92,7 +96,6 @@ export default async function contentController(fastify: FastifyInstance) {
           }
           return value;
         });
-      }
 
       return reply.status(200).send({
         contents: responseContents,
@@ -112,56 +115,92 @@ export default async function contentController(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      let emailTemplate: EmailTemplate;
-      const { id, workspaceId, from, subject, body, name } = request.body;
-      const canCreate = workspaceId && from && subject && body && name;
+      const resource = await upsertMessageTemplate(request.body);
+      return reply.status(200).send(resource);
+    }
+  );
 
-      if (canCreate && id) {
-        emailTemplate = await prisma().emailTemplate.upsert({
-          where: {
-            id,
-          },
-          create: {
-            id,
-            workspaceId,
-            from,
-            name,
-            subject,
-            body,
-          },
-          update: {
-            workspaceId,
-            name,
-            from,
-            subject,
-            body,
-          },
+  fastify.withTypeProvider<TypeBoxTypeProvider>().post(
+    "/templates/test",
+    {
+      schema: {
+        description: "Send a test message for a message template.",
+        body: MessageTemplateTestRequest,
+        response: {
+          200: MessageTemplateTestResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = await sendMessage({
+        workspaceId: request.body.workspaceId,
+        templateId: request.body.templateId,
+        userPropertyAssignments: request.body.userProperties,
+        channel: request.body.channel,
+        useDraft: true,
+      });
+      if (result.isOk()) {
+        return reply.status(200).send({
+          type: JsonResultType.Ok,
+          value: result.value,
         });
-      } else {
-        emailTemplate = await prisma().emailTemplate.update({
-          where: {
-            id,
-          },
-          data: {
-            workspaceId,
-            name,
-            from,
-            subject,
-            body,
+      }
+      if (
+        result.error.type === InternalEventType.MessageSkipped &&
+        result.error.variant.type === MessageSkippedType.MissingIdentifier
+      ) {
+        return reply.status(200).send({
+          type: JsonResultType.Err,
+          err: {
+            suggestions: [
+              `Missing identifying user property value: ${result.error.variant.identifierKey}`,
+            ],
           },
         });
       }
-
-      const resource: EmailTemplateResource = {
-        type: TemplateResourceType.Email,
-        id: emailTemplate.id,
-        from: emailTemplate.from,
-        name: emailTemplate.name,
-        subject: emailTemplate.subject,
-        body: emailTemplate.body,
-        workspaceId: emailTemplate.workspaceId,
-      };
-      return reply.status(200).send(resource);
+      if (result.error.type === InternalEventType.MessageFailure) {
+        if (
+          result.error.variant.type === ChannelType.Email &&
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+          result.error.variant.provider.type === EmailProviderType.Sendgrid
+        ) {
+          const { body, status } = result.error.variant.provider;
+          const suggestions: string[] = [];
+          if (status) {
+            suggestions.push(`Sendgrid responded with status: ${status}`);
+            if (status === 403) {
+              suggestions.push(
+                "Is the configured email domain authorized in sengrid?"
+              );
+            }
+          }
+          return reply.status(200).send({
+            type: JsonResultType.Err,
+            err: {
+              suggestions,
+              responseData: body,
+            },
+          });
+        }
+      }
+      if (
+        result.error.type === InternalEventType.BadWorkspaceConfiguration &&
+        (result.error.variant.type ===
+          BadWorkspaceConfigurationType.MessageServiceProviderMisconfigured ||
+          result.error.variant.type ===
+            BadWorkspaceConfigurationType.MessageServiceProviderNotFound)
+      ) {
+        return reply.status(200).send({
+          type: JsonResultType.Err,
+          err: {
+            suggestions: [
+              "Unable to send message, because Your message service provider is not configured correctly.",
+            ],
+          },
+        });
+      }
+      logger().error(result.error, "Unexpected error sending test message");
+      return reply.status(500);
     }
   );
 
@@ -178,29 +217,14 @@ export default async function contentController(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const { id, type } = request.body;
+      const { id } = request.body;
 
       try {
-        switch (type) {
-          case TemplateResourceType.Email: {
-            await prisma().emailTemplate.delete({
-              where: {
-                id,
-              },
-            });
-            break;
-          }
-          default: {
-            logger().error(
-              {
-                type,
-              },
-              "Unhandled message template type."
-            );
-            const response = await reply.status(500).send();
-            return response;
-          }
-        }
+        await prisma().messageTemplate.delete({
+          where: {
+            id,
+          },
+        });
       } catch (e) {
         if (e instanceof Prisma.PrismaClientKnownRequestError) {
           switch (e.code) {

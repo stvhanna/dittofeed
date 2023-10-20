@@ -1,3 +1,5 @@
+import { DittofeedSdk } from "@dittofeed/sdk-node";
+import backendConfig from "backend-lib/src/config";
 import logger from "backend-lib/src/logger";
 import {
   getRequestContext,
@@ -5,20 +7,20 @@ import {
 } from "backend-lib/src/requestContext";
 import {
   EMAIL_NOT_VERIFIED_PAGE,
+  SINGLE_TENANT_LOGIN_PAGE,
   UNAUTHORIZED_PAGE,
   WAITING_ROOM_PAGE,
 } from "isomorphic-lib/src/constants";
 import { GetServerSideProps } from "next";
 
+import { apiBase } from "./apiBase";
 import { GetDFServerSideProps, PropsWithInitialState } from "./types";
 
 export const requestContext: <T>(
   gssp: GetDFServerSideProps<PropsWithInitialState<T>>
 ) => GetServerSideProps<PropsWithInitialState<T>> =
   (gssp) => async (context) => {
-    const rc = await getRequestContext(
-      context.req.headers.authorization ?? null
-    );
+    const rc = await getRequestContext(context.req.headers);
     if (rc.isErr()) {
       switch (rc.error.type) {
         case RequestContextErrorType.EmailNotVerified:
@@ -51,7 +53,46 @@ export const requestContext: <T>(
           };
         case RequestContextErrorType.ApplicationError:
           throw new Error(rc.error.message);
+        case RequestContextErrorType.NotAuthenticated:
+          if (backendConfig().authMode === "single-tenant") {
+            return {
+              redirect: {
+                destination: SINGLE_TENANT_LOGIN_PAGE,
+                permanent: false,
+              },
+            };
+          }
+          return {
+            redirect: {
+              destination: UNAUTHORIZED_PAGE,
+              permanent: false,
+            },
+          };
       }
     }
-    return gssp(context, rc.value);
+
+    const { dashboardWriteKey, trackDashboard } = backendConfig();
+
+    if (dashboardWriteKey && trackDashboard) {
+      await DittofeedSdk.init({
+        writeKey: dashboardWriteKey,
+        host: apiBase(),
+      });
+    }
+
+    const dfContext = rc.value;
+
+    DittofeedSdk.identify({
+      userId: dfContext.member.id,
+      traits: {
+        workspaceId: dfContext.workspace.id,
+        email: dfContext.member.email,
+        firstName: dfContext.member.name,
+        nickname: dfContext.member.nickname,
+        createdAt: dfContext.member.createdAt,
+        emailVerified: dfContext.member.emailVerified,
+      },
+    });
+
+    return gssp(context, dfContext);
   };

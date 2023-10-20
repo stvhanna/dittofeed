@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+
+import { assertUnreachable } from "isomorphic-lib/src/typeAssertions";
 import jp from "jsonpath";
 
 import {
@@ -9,9 +12,13 @@ import logger from "../../../../logger";
 import {
   EnrichedSegment,
   EnrichedUserProperty,
+  GroupChildrenUserPropertyDefinitions,
+  GroupUserPropertyDefinition,
   InternalEventType,
   LastPerformedSegmentNode,
+  LeafUserPropertyDefinition,
   PerformedSegmentNode,
+  RelationalOperators,
   SegmentHasBeenOperatorComparator,
   SegmentNode,
   SegmentNodeType,
@@ -33,14 +40,17 @@ interface UserComputedProperty {
 
 type ComputedProperty = SegmentComputedProperty | UserComputedProperty;
 
-function pathToArgs(path: string): string | null {
+function pathToArgs(
+  path: string,
+  queryBuilder: ClickHouseQueryBuilder
+): string | null {
   try {
     return jp
       .parse(path)
-      .map((c) => `'${c.expression.value}'`)
+      .map((c) => queryBuilder.addQueryValue(c.expression.value, "String"))
       .join(", ");
   } catch (e) {
-    logger().error({ err: e });
+    logger().info({ err: e });
     return null;
   }
 }
@@ -130,9 +140,36 @@ function buildSegmentQueryExpression({
         id: node.id,
         type: SegmentNodeType.Performed,
         event: InternalEventType.SegmentBroadcast,
+        times: 1,
+        timesOperator: RelationalOperators.GreaterThanOrEqual,
         properties: [
           {
             path: "segmentId",
+            operator: {
+              type: SegmentOperatorType.Equals,
+              value: segmentId,
+            },
+          },
+        ],
+      };
+      return buildSegmentQueryExpression({
+        currentTime,
+        queryBuilder,
+        node: performedNode,
+        nodes,
+        segmentId,
+      });
+    }
+    case SegmentNodeType.Email: {
+      const performedNode: PerformedSegmentNode = {
+        id: node.id,
+        type: SegmentNodeType.Performed,
+        event: node.event,
+        times: 1,
+        timesOperator: RelationalOperators.GreaterThanOrEqual,
+        properties: [
+          {
+            path: "templateId",
             operator: {
               type: SegmentOperatorType.Equals,
               value: segmentId,
@@ -155,7 +192,7 @@ function buildSegmentQueryExpression({
       if (node.whereProperties) {
         for (const property of node.whereProperties) {
           const path = queryBuilder.addQueryValue(
-            `$.properties.${property.path}`,
+            `$.${property.path}`,
             "String"
           );
           const operatorType = property.operator.type;
@@ -198,10 +235,7 @@ function buildSegmentQueryExpression({
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         const property = node.hasProperties[i]!;
         const operatorType = property.operator.type;
-        const path = queryBuilder.addQueryValue(
-          `$.properties.${property.path}`,
-          "String"
-        );
+        const path = queryBuilder.addQueryValue(`$.${property.path}`, "String");
 
         let condition: string;
         switch (property.operator.type) {
@@ -249,7 +283,7 @@ function buildSegmentQueryExpression({
       if (node.properties) {
         for (const property of node.properties) {
           const path = queryBuilder.addQueryValue(
-            `$.properties.${property.path}`,
+            `$.${property.path}`,
             "String"
           );
           const operatorType = property.operator.type;
@@ -278,15 +312,22 @@ function buildSegmentQueryExpression({
         }
       }
 
+      const times = node.times === undefined ? 1 : node.times;
+      const operator: string = node.timesOperator ?? RelationalOperators.Equals;
+
       return `
-        arrayFirstIndex(
+        arrayCount(
           m -> and(${conditions.join(",")}),
           timed_messages
-        ) > 0
+        ) ${operator} ${queryBuilder.addQueryValue(times, "Int32")}
       `;
     }
     case SegmentNodeType.Trait: {
-      const pathArgs = pathToArgs(node.path);
+      const pathArgs = pathToArgs(node.path, queryBuilder);
+      const jsonValuePath = queryBuilder.addQueryValue(
+        `$.${node.path}`,
+        "String"
+      );
       if (!pathArgs) {
         return null;
       }
@@ -311,12 +352,12 @@ function buildSegmentQueryExpression({
           return `
             JSON_VALUE(
               (
-                arrayFilter(
-                  m -> JSONHas(m.1, 'traits', ${pathArgs}),
+                arrayFirst(
+                  m -> JSONHas(m.1, ${pathArgs}),
                   timed_messages
                 )
-              )[1].1,
-              '$.traits.${node.path}'
+              ).1,
+              ${jsonValuePath}
             ) == ${queryVal}
           `;
         }
@@ -350,11 +391,11 @@ function buildSegmentQueryExpression({
               JSON_VALUE(
                 (
                   arrayFirst(
-                    m -> JSONHas(m.1, 'traits', ${pathArgs}),
+                    m -> JSONHas(m.1, ${pathArgs}),
                     timed_messages
                   ) as ${varName}
                 ).1,
-                '$.traits.${node.path}'
+                ${jsonValuePath}
               ) == ${queryVal},
               ${varName}.2 < toDateTime64(${upperTraitBound}, 3)
             )`;
@@ -372,22 +413,34 @@ function buildSegmentQueryExpression({
               (
                 parseDateTime64BestEffortOrNull(
                   JSON_VALUE(
-                    arrayFilter(
-                      m -> JSONHas(m.1, 'traits', ${pathArgs}),
+                    arrayFirst(
+                      m -> JSONHas(m.1, ${pathArgs}),
                       timed_messages
-                    )[1].1,
-                    '$.traits.${node.path}'
+                    ).1,
+                    ${jsonValuePath}
                   )
                 ) as trait_time${traitIdentifier}
               ) > toDateTime64(${lowerTraitBound}, 3),
               trait_time${traitIdentifier} < toDateTime64(${upperTraitBound}, 3)
             )`;
         }
-        default:
-          throw new Error(
-            `Unimplemented operator for ${node.type} segment node ${node.operator.type}`
-          );
+        case SegmentOperatorType.NotEquals: {
+          throw new Error(`Unimplemented operator ${node.operator.type}`);
+        }
+        case SegmentOperatorType.Exists: {
+          return `
+            arrayExists(
+              m -> JSONHas(m.1, ${pathArgs}),
+              timed_messages
+            )
+          `;
+        }
+        default: {
+          const operatorType: never = node.operator;
+          assertUnreachable(operatorType);
+        }
       }
+      break;
     }
     case SegmentNodeType.And: {
       const childIds = new Set(node.children);
@@ -403,6 +456,9 @@ function buildSegmentQueryExpression({
           })
         )
         .filter((query) => query !== null);
+      if (childFragments.length === 0) {
+        return null;
+      }
       if (childFragments[0] && childFragments.length === 1) {
         return childFragments[0];
       }
@@ -424,6 +480,9 @@ function buildSegmentQueryExpression({
           })
         )
         .filter((query) => query !== null);
+      if (childFragments.length === 0) {
+        return null;
+      }
       if (childFragments[0] && childFragments.length === 1) {
         return childFragments[0];
       }
@@ -442,7 +501,7 @@ function buildSegmentQueryFragment({
   currentTime: number;
   segment: EnrichedSegment;
   queryBuilder: ClickHouseQueryBuilder;
-}): string | null {
+}): string {
   const query = buildSegmentQueryExpression({
     queryBuilder,
     currentTime,
@@ -452,7 +511,13 @@ function buildSegmentQueryFragment({
   });
 
   if (query === null) {
-    return null;
+    return `
+      (
+        false,
+        Null,
+        '${segment.id}'
+      )
+    `;
   }
 
   // TODO use query builder for this
@@ -465,49 +530,203 @@ function buildSegmentQueryFragment({
   `;
 }
 
-function buildUserPropertyQueryFragment({
+function buildLeafUserPropertyQueryExpression({
   userProperty,
+  queryBuilder,
 }: {
-  userProperty: EnrichedUserProperty;
+  userProperty: LeafUserPropertyDefinition;
   queryBuilder: ClickHouseQueryBuilder;
 }): string | null {
-  let innerQuery: string;
-  switch (userProperty.definition.type) {
-    case UserPropertyDefinitionType.Trait: {
-      const { path } = userProperty.definition;
-      const pathArgs = pathToArgs(path);
+  switch (userProperty.type) {
+    case UserPropertyDefinitionType.Performed: {
+      const { path } = userProperty;
+      const jsonValuePath = queryBuilder.addQueryValue(`$.${path}`, "String");
+      const pathArgs = pathToArgs(path, queryBuilder);
       if (!pathArgs) {
         return null;
       }
 
-      // TODO use query builder for this
-      innerQuery = `
+      return `
           JSON_VALUE(
-            (
-              arraySort(
-                m -> -toInt64(m.2),
-                arrayFilter(
-                  m -> JSONHas(m.1, 'traits', ${pathArgs}),
-                  timed_messages
-                )
-              )
-            )[1].1,
-            '$.traits.${path}'
+            arrayFirst(
+              m -> and(
+                JSONHas(m.1, ${pathArgs}),
+                m.5 = ${queryBuilder.addQueryValue(
+                  userProperty.event,
+                  "String"
+                )}
+              ),
+              timed_messages
+            ).1,
+            ${jsonValuePath}
           )
       `;
-      break;
     }
-    case UserPropertyDefinitionType.Id: {
-      innerQuery = "user_id";
-      break;
-    }
-    case UserPropertyDefinitionType.AnonymousId: {
-      innerQuery = "any(anonymous_id)";
-      break;
+    case UserPropertyDefinitionType.Trait: {
+      const { path } = userProperty;
+      const jsonValuePath = queryBuilder.addQueryValue(`$.${path}`, "String");
+      const pathArgs = pathToArgs(path, queryBuilder);
+      if (!pathArgs) {
+        return null;
+      }
+
+      return `
+        JSON_VALUE(
+          arrayFirst(
+            m -> JSONHas(m.1, ${pathArgs}),
+            timed_messages
+          ).1,
+          ${jsonValuePath}
+        )
+      `;
     }
   }
+}
 
-  // TODO use query builder for this
+function buildGroupedUserPropertyQueryExpression({
+  userProperty,
+  child,
+  queryBuilder,
+}: {
+  child: GroupChildrenUserPropertyDefinitions;
+  userProperty: GroupUserPropertyDefinition;
+  queryBuilder: ClickHouseQueryBuilder;
+}): string | null {
+  switch (child.type) {
+    case UserPropertyDefinitionType.Performed: {
+      return buildLeafUserPropertyQueryExpression({
+        userProperty: child,
+        queryBuilder,
+      });
+    }
+    case UserPropertyDefinitionType.Trait: {
+      return buildLeafUserPropertyQueryExpression({
+        userProperty: child,
+        queryBuilder,
+      });
+    }
+    case UserPropertyDefinitionType.AnyOf: {
+      const childIds = new Set(child.children);
+      const childNodes = userProperty.nodes.filter(
+        (n) => n.id && childIds.has(n.id)
+      );
+      const childFragments = childNodes
+        .map((childNode) =>
+          buildGroupedUserPropertyQueryExpression({
+            child: childNode,
+            userProperty,
+            queryBuilder,
+          })
+        )
+        .filter((query) => query !== null)
+        .map((query) => {
+          const queryId = getChCompatibleUuid();
+          return `if(empty(${query} as ${queryId}), Null, ${queryId})`;
+        });
+      if (childFragments.length === 0) {
+        return null;
+      }
+      if (childFragments[0] && childFragments.length === 1) {
+        return childFragments[0];
+      }
+      return `coalesce(
+        ${childFragments.join(", ")}
+      )`;
+    }
+  }
+}
+
+function buildUserPropertyQueryExpression({
+  userProperty,
+  queryBuilder,
+}: {
+  userProperty: EnrichedUserProperty;
+  queryBuilder: ClickHouseQueryBuilder;
+}): string | null {
+  switch (userProperty.definition.type) {
+    case UserPropertyDefinitionType.Group: {
+      const { entry } = userProperty.definition;
+
+      const entryNode = userProperty.definition.nodes.find(
+        (n) => n.id === entry
+      );
+      if (!entryNode) {
+        return null;
+      }
+      return buildGroupedUserPropertyQueryExpression({
+        userProperty: userProperty.definition,
+        child: entryNode,
+        queryBuilder,
+      });
+    }
+    case UserPropertyDefinitionType.Id: {
+      return "user_id";
+    }
+    case UserPropertyDefinitionType.AnonymousId: {
+      return "any(anonymous_id)";
+    }
+    case UserPropertyDefinitionType.Trait: {
+      return buildLeafUserPropertyQueryExpression({
+        userProperty: userProperty.definition,
+        queryBuilder,
+      });
+    }
+    case UserPropertyDefinitionType.Performed: {
+      return buildLeafUserPropertyQueryExpression({
+        userProperty: userProperty.definition,
+        queryBuilder,
+      });
+    }
+    case UserPropertyDefinitionType.PerformedMany: {
+      if (userProperty.definition.or.length === 0) {
+        return null;
+      }
+      const orFragments = userProperty.definition.or.map(
+        ({ event }) => `m.5 = ${queryBuilder.addQueryValue(event, "String")}`
+      );
+      const eventsName = getChCompatibleUuid();
+      return `
+        if(
+          empty(
+            arrayMap(
+              m -> map('event', m.5, 'properties', m.1, 'timestamp', formatDateTime(m.2, '%Y-%m-%dT%H:%M:%S')),
+              arrayFilter(
+                m -> or(${orFragments.join(", ")}),
+                timed_messages
+              )
+            ) as ${eventsName}
+          ),
+          '',
+          toJSONString(${eventsName})
+        )
+      `;
+    }
+  }
+}
+
+function buildUserPropertyQueryFragment({
+  userProperty,
+  queryBuilder,
+}: {
+  userProperty: EnrichedUserProperty;
+  queryBuilder: ClickHouseQueryBuilder;
+}): string {
+  const innerQuery = buildUserPropertyQueryExpression({
+    userProperty,
+    queryBuilder,
+  });
+
+  if (innerQuery === null) {
+    return `
+      (
+        Null,
+        '""',
+        '${userProperty.id}'
+      )
+    `;
+  }
+
+  // TODO remove json stringification
   return `
     (
       Null,
@@ -537,9 +756,7 @@ function computedToQueryFragments({
           queryBuilder,
         });
 
-        if (fragment !== null) {
-          modelFragments.push(fragment);
-        }
+        modelFragments.push(fragment);
         break;
       }
       case "Segment": {
@@ -549,9 +766,7 @@ function computedToQueryFragments({
           currentTime,
         });
 
-        if (fragment !== null) {
-          modelFragments.push(fragment);
-        }
+        modelFragments.push(fragment);
         break;
       }
     }
@@ -564,7 +779,7 @@ function computedToQueryFragments({
       arraySort(
         m -> -toInt64(m.2),
         arrayZip(
-          groupArray(message_raw),
+          groupArray(if(event_type == 'identify', JSONExtractString(message_raw, 'traits'), JSONExtractString(message_raw, 'properties'))),
           groupArray(event_time),
           groupArray(processing_time),
           groupArray(event_type),
@@ -645,43 +860,45 @@ export default async function writeAssignments({
       .join(",\n");
 
     const writeQuery = `
-    INSERT INTO computed_property_assignments
-    SELECT
-      '${workspaceId}',
-      sas.user_id,
-      if(isNull(in_segment), 1, 2),
-      sas.computed_property_id,
-      coalesce(sas.in_segment, False),
-      coalesce(sas.user_property, ''),
-      now64(3)
-    FROM (
+      INSERT INTO computed_property_assignments
       SELECT
-        ${joinedWithClause},
-        user_id,
-        history_length,
-        in_segment,
-        user_property,
-        latest_processing_time,
-        timed_messages
-      FROM user_events_${tableVersion}
-      WHERE workspace_id == '${workspaceId}' AND isNotNull(user_id)
-      GROUP BY user_id
-      ORDER BY latest_processing_time DESC
-    ) sas
-  `;
+        '${workspaceId}',
+        sas.user_id,
+        if(isNull(in_segment), 1, 2),
+        sas.computed_property_id,
+        coalesce(sas.in_segment, False),
+        coalesce(sas.user_property, ''),
+        now64(3)
+      FROM (
+        SELECT
+          ${joinedWithClause},
+          user_id,
+          history_length,
+          in_segment,
+          user_property,
+          latest_processing_time
+        FROM user_events_${tableVersion}
+        WHERE workspace_id == '${workspaceId}' AND isNotNull(user_id)
+        GROUP BY workspace_id, user_id
+        ORDER BY latest_processing_time DESC
+      ) sas
+    `;
 
-    logger().debug(
-      {
-        workspaceId,
+    const queryId = randomUUID();
+
+    try {
+      await clickhouseClient().command({
         query: writeQuery,
-      },
-      "compute properties write query"
-    );
-
-    await clickhouseClient().query({
-      query: writeQuery,
-      query_params: writeReadChqb.getQueries(),
-      format: "JSONEachRow",
-    });
+        query_params: writeReadChqb.getQueries(),
+        query_id: queryId,
+      });
+    } catch (e) {
+      logger().error(
+        { workspaceId, queryId, err: e },
+        "failed write assignments query"
+      );
+      throw e;
+    }
+    logger().info({ workspaceId, queryId }, "write assignments query");
   }
 }

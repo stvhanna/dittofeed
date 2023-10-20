@@ -2,9 +2,12 @@
 import { SUBSCRIPTION_SECRET_NAME } from "isomorphic-lib/src/constants";
 import { Liquid } from "liquidjs";
 import MarkdownIt from "markdown-it";
+import mjml2html from "mjml";
 
+import logger from "./logger";
 import { generateSubscriptionChangeUrl } from "./subscriptionGroups";
 import { SubscriptionChange } from "./types";
+import { assignmentAsString, UserPropertyAssignments } from "./userProperties";
 
 const md = new MarkdownIt({
   html: true,
@@ -69,24 +72,28 @@ export const liquidEngine = new Liquid({
 liquidEngine.registerFilter("markdown", (value) => md.render(value));
 
 type Secrets = Record<string, string>;
-type UserProperties = Record<string, string>;
 
 liquidEngine.registerTag("unsubscribe_link", {
-  parse() {},
+  parse(tagToken) {
+    this.contents = tagToken.args;
+  },
   render(scope) {
+    const linkText = this.contents || "unsubscribe";
+
     const allScope = scope.getAll() as Record<string, unknown>;
     const secrets = allScope.secrets as Secrets | undefined;
     const workspaceId = allScope.workspace_id as string;
     const subscriptionGroupId = allScope.subscription_group_id as
       | string
       | undefined;
-    const userProperties = allScope.user as UserProperties;
+    const userProperties = allScope.user as UserPropertyAssignments;
     const identifierKey = allScope.identifier_key as string;
 
     let href = "";
 
-    const identifier = userProperties[identifierKey];
-    const userId = userProperties.id;
+    const identifier = assignmentAsString(userProperties, identifierKey);
+    const userId = assignmentAsString(userProperties, "id");
+
     const subscriptionSecret = secrets?.[SUBSCRIPTION_SECRET_NAME];
     if (subscriptionSecret && identifier && userId) {
       const url = generateSubscriptionChangeUrl({
@@ -99,11 +106,24 @@ liquidEngine.registerTag("unsubscribe_link", {
         subscriptionChange: SubscriptionChange.Unsubscribe,
       });
       href = `href="${url}"`;
+    } else {
+      logger().debug(
+        {
+          hasSubscriptionSecret: !!subscriptionSecret,
+          identifier,
+          userId,
+        },
+        "Unsubscribe link not rendering"
+      );
     }
 
-    return `<a class="df-unsubscribe" ${href}>Unsubscribe</a>`;
+    // Note that clicktracking=off is added to the unsubscribe link to prevent sendgrid from including link tracking
+    return `<a class="df-unsubscribe" clicktracking=off ${href} target="_blank">${linkText}</a>`;
   },
 });
+
+const MJML_NOT_PRESENT_ERROR =
+  "Check that your structure is correct and enclosed in <mjml> tags";
 
 export function renderLiquid({
   template,
@@ -112,19 +132,37 @@ export function renderLiquid({
   subscriptionGroupId,
   identifierKey,
   secrets = {},
+  mjml = false,
 }: {
-  template: string;
+  template?: string;
+  mjml?: boolean;
   identifierKey: string;
-  userProperties: UserProperties;
+  userProperties: UserPropertyAssignments;
   secrets?: Secrets;
   subscriptionGroupId?: string;
   workspaceId: string;
 }): string {
-  return liquidEngine.parseAndRenderSync(template, {
+  if (!template?.length) {
+    return "";
+  }
+
+  const liquidRendered = liquidEngine.parseAndRenderSync(template, {
     user: userProperties,
     workspace_id: workspaceId,
     subscription_group_id: subscriptionGroupId,
     secrets,
     identifier_key: identifierKey,
   });
+  if (!mjml) {
+    return liquidRendered;
+  }
+  try {
+    return mjml2html(liquidRendered).html;
+  } catch (e) {
+    const error = e as Error;
+    if (error.message.includes(MJML_NOT_PRESENT_ERROR)) {
+      return liquidRendered;
+    }
+    throw e;
+  }
 }
